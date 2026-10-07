@@ -1,0 +1,26 @@
+{
+  "data_dir": "data",
+  "artifact_dir": "artifacts",
+  "diseases": [
+    {"key": "nsclc", "name": "Non-small cell lung cancer", "open_targets_id": "MONDO_0005233"},
+    {"key": "alzheimers_disease", "name": "Alzheimer disease", "open_targets_id": "MONDO_0004975"},
+    {"key": "type_2_diabetes", "name": "Type 2 diabetes mellitus", "open_targets_id": "MONDO_0005148"}
+  ],
+  "target_limit": 100,
+  "chembl_activity_limit": 10000,
+  "seed": 17,
+  "models": {
+    "target_ranker": "satori.relational_graph_attention.v1",
+    "molecule_generator": "ibm-research/GP-MoLFormer-Uniq@6eca879581e2302b4e1ab07bb02908636bddb4a2",
+    "molecule_tokenizer": "ibm-research/MoLFormer-XL-both-10pct@361063d0ad524ef77cf39b08469f6be770dc550f",
+    "conformer_model": "drugs-o3",
+    "optimizer": "graphfdm",
+    "affinity_model": "satori.protein_ligand_cross_attention.v1",
+    "docking_binary": "vina"
+  },
+  "checkpoints": {
+    "target_ranker": null,
+    "optimizer": null,
+    "affinity_model": null
+  }
+}

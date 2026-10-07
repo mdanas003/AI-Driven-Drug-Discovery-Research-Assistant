@@ -1,0 +1,6 @@
+numpy==2.2.4
+rdkit==2024.9.6
+transformers==4.51.3
+accelerate==1.5.2
+safetensors==0.5.3
+boto3==1.37.38

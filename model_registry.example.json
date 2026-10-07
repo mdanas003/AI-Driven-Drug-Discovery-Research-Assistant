@@ -1,0 +1,110 @@
+{
+  "schema_version": "1.0",
+  "models": {
+    "gp_molformer_uniq": {
+      "model_name": "IBM GP-MoLFormer-Uniq",
+      "version": "pinned-revision",
+      "checkpoint_identifier": "ibm-research/GP-MoLFormer-Uniq@6eca879581e2302b4e1ab07bb02908636bddb4a2",
+      "tokenizer_identifier": "ibm-research/MoLFormer-XL-both-10pct@361063d0ad524ef77cf39b08469f6be770dc550f",
+      "source": "https://huggingface.co/ibm-research/GP-MoLFormer-Uniq",
+      "download_location": "Hugging Face Hub; cache via SATORI_MODEL_CACHE_DIR/HF_HOME",
+      "artifact_path": null,
+      "sha256": null,
+      "expected_environment": "Python 3.11; PyTorch CUDA 12.4 image or CPU image",
+      "license": "Apache-2.0 per model card; verify tokenizer/model card at use",
+      "availability": "remote-pinned",
+      "blocker": "Base checkpoint is real and pinned but is unconditional/scaffold-prompted; target conditioning needs separate validated fine-tuning."
+    },
+    "etflow_drugs_o3": {
+      "model_name": "ET-Flow drugs-o3",
+      "version": "upstream commit and checkpoint hash must be recorded at provisioning",
+      "checkpoint_identifier": "drugs-o3",
+      "source": "https://github.com/shenoynikhil/ETFlow and Zenodo record 14226681",
+      "download_location": "Upstream model cache; do not bake weights into the image",
+      "artifact_path": null,
+      "sha256": null,
+      "expected_environment": "Linux x86-64; Python 3.10; PyTorch CUDA 12.1; NumPy 1.26.4; matching PyG/torch-cluster",
+      "license": "Code MIT; checkpoint license is not stated in linked record",
+      "availability": "blocked",
+      "blocker": "Checkpoint use rights are unresolved; compatible cloud runtime and actual validation are also pending."
+    },
+    "temporal_gnn": {
+      "model_name": "Satori temporal relational GNN",
+      "version": "architecture v1; training checkpoint absent",
+      "checkpoint_identifier": null,
+      "source": "Satori source implementation",
+      "download_location": null,
+      "artifact_path": null,
+      "sha256": null,
+      "expected_environment": "Pinned PyTorch GPU worker",
+      "license": "Project license",
+      "availability": "untrained",
+      "blocker": "No disease-specific leakage-controlled training data, benchmark, or fitted checkpoint."
+    },
+    "target_gfm": {
+      "model_name": "Target graph foundation model",
+      "version": "unspecified",
+      "checkpoint_identifier": null,
+      "source": null,
+      "download_location": null,
+      "artifact_path": null,
+      "sha256": null,
+      "expected_environment": "Model-specific after reference selection",
+      "license": "Unknown until model selected",
+      "availability": "blocked",
+      "blocker": "Approved specification does not identify an exact compatible GFM/checkpoint."
+    },
+    "graphfdm": {
+      "model_name": "GraphFDM primary optimizer",
+      "version": "implementation/checkpoint unspecified",
+      "checkpoint_identifier": null,
+      "source": null,
+      "download_location": null,
+      "artifact_path": null,
+      "sha256": null,
+      "expected_environment": "Pinned PyTorch GPU worker after upstream implementation is selected",
+      "license": "Unknown until reference is selected",
+      "availability": "blocked",
+      "blocker": "No identified implementation/checkpoint or validated objective-model training procedure."
+    },
+    "rl_baseline": {
+      "model_name": "RL optimizer baseline",
+      "version": "training procedure/checkpoint unspecified",
+      "checkpoint_identifier": null,
+      "source": null,
+      "download_location": null,
+      "artifact_path": null,
+      "sha256": null,
+      "expected_environment": "Pinned PyTorch GPU worker after baseline method is defined",
+      "license": "Unknown until method/reference selected",
+      "availability": "blocked",
+      "blocker": "Baseline remains distinct; it is not trained or substituted for GraphFDM."
+    },
+    "protein_ligand_affinity": {
+      "model_name": "Satori protein-ligand cross-attention",
+      "version": "architecture v1; untrained",
+      "checkpoint_identifier": null,
+      "source": "Satori source implementation",
+      "download_location": null,
+      "artifact_path": null,
+      "sha256": null,
+      "expected_environment": "Pinned PyTorch CUDA GPU worker",
+      "license": "Project license",
+      "availability": "untrained",
+      "blocker": "Target assay data, leakage-resistant split, training, calibration, and external evaluation are pending."
+    },
+    "admet_predictors": {
+      "model_name": "ADMET predictor collection",
+      "version": "endpoints/model choices unresolved",
+      "checkpoint_identifier": null,
+      "source": null,
+      "download_location": null,
+      "artifact_path": null,
+      "sha256": null,
+      "expected_environment": "Per-model runtime to be recorded before installation",
+      "license": "Unknown until predictors selected",
+      "availability": "blocked",
+      "blocker": "Calibrated endpoints, validated thresholds, and predictor licenses have not been selected."
+    }
+  }
+}

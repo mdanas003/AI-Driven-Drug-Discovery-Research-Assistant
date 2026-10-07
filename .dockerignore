@@ -1,0 +1,17 @@
+.git
+.venv
+.uv-cache
+.env
+data/
+artifacts/
+model-cache/
+checkpoints/
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.sdf
+*.pdb
+*.pdbqt
+__pycache__/
+*.py[cod]

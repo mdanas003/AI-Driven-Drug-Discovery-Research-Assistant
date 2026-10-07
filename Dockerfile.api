@@ -1,0 +1,21 @@
+FROM python:3.11.11-slim-bookworm
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    SATORI_DATA_DIR=/opt/satori/data SATORI_ARTIFACT_DIR=/opt/satori/artifacts \
+    SATORI_STATE_DB=/opt/satori/artifacts/state/jobs.sqlite3 \
+    SATORI_STORAGE_URI=/opt/satori/artifacts SATORI_MODEL_REGISTRY=/opt/satori/model_registry.json \
+    SATORI_MODEL_CACHE_DIR=/opt/satori/model-cache
+WORKDIR /opt/satori
+COPY requirements/cloud-api.lock requirements/cloud-api.lock
+RUN python -m pip install --no-cache-dir -r requirements/cloud-api.lock
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN python -m pip install --no-cache-dir --no-deps . \
+    && useradd --create-home --uid 10001 satori \
+    && mkdir -p /opt/satori/data /opt/satori/artifacts/state /opt/satori/model-cache \
+    && chown -R satori:satori /opt/satori
+COPY model_registry.example.json /opt/satori/model_registry.json
+USER 10001:10001
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+CMD ["uvicorn", "satori.api:app", "--host", "0.0.0.0", "--port", "8000"]

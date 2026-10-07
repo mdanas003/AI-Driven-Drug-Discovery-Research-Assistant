@@ -1,0 +1,92 @@
+name: satori
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    env_file: .env
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - satori-data:/opt/satori/data
+      - satori-artifacts:/opt/satori/artifacts
+      - satori-model-cache:/opt/satori/model-cache
+    restart: unless-stopped
+
+  cpu-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker.cpu
+    env_file: .env
+    environment:
+      SATORI_WORKER_QUEUE: cpu
+    volumes:
+      - satori-data:/opt/satori/data
+      - satori-artifacts:/opt/satori/artifacts
+      - satori-model-cache:/opt/satori/model-cache
+    restart: unless-stopped
+
+  gpu-worker:
+    profiles: [gpu]
+    build:
+      context: .
+      dockerfile: Dockerfile.worker.gpu
+    env_file: .env
+    environment:
+      SATORI_WORKER_QUEUE: gpu
+      SATORI_DEVICE: cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - satori-data:/opt/satori/data
+      - satori-artifacts:/opt/satori/artifacts
+      - satori-model-cache:/opt/satori/model-cache
+    restart: unless-stopped
+
+  etflow-worker:
+    profiles: [etflow]
+    build:
+      context: .
+      dockerfile: Dockerfile.worker.etflow
+      args:
+        ETFLOW_GIT_COMMIT: ${ETFLOW_GIT_COMMIT:-unresolved}
+    env_file: .env
+    environment:
+      SATORI_WORKER_QUEUE: etflow
+      SATORI_DEVICE: cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - satori-data:/opt/satori/data
+      - satori-artifacts:/opt/satori/artifacts
+      - satori-model-cache:/opt/satori/model-cache
+    restart: unless-stopped
+
+  docking-worker:
+    profiles: [docking]
+    build:
+      context: .
+      dockerfile: Dockerfile.worker.docking
+    env_file: .env
+    environment:
+      SATORI_WORKER_QUEUE: docking
+    volumes:
+      - satori-data:/opt/satori/data
+      - satori-artifacts:/opt/satori/artifacts
+      - satori-model-cache:/opt/satori/model-cache
+    restart: unless-stopped
+
+volumes:
+  satori-data:
+  satori-artifacts:
+  satori-model-cache:

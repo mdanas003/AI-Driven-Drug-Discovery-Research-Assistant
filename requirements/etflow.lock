@@ -1,0 +1,16 @@
+numpy==1.26.4
+scipy==1.13.1
+pandas==2.2.3
+rdkit==2024.9.6
+datamol==0.12.5
+py3Dmol==2.5.2
+lightning==2.4.0
+torchmetrics==1.5.2
+torch-geometric==2.6.1
+tqdm==4.67.1
+pydantic==2.10.6
+fsspec==2025.2.0
+boto3==1.37.38
+setuptools==75.8.0
+setuptools-scm==8.2.0
+wheel==0.45.1

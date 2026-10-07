@@ -1,0 +1,24 @@
+# GP-MoLFormer/GNN/GraphFDM/affinity GPU runtime. Model weights stay in the mounted cache.
+FROM python:3.11.11-slim-bookworm
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    SATORI_DATA_DIR=/opt/satori/data SATORI_ARTIFACT_DIR=/opt/satori/artifacts \
+    SATORI_STATE_DB=/opt/satori/artifacts/state/jobs.sqlite3 \
+    SATORI_STORAGE_URI=/opt/satori/artifacts SATORI_MODEL_REGISTRY=/opt/satori/model_registry.json \
+    SATORI_MODEL_CACHE_DIR=/opt/satori/model-cache SATORI_WORKER_QUEUE=gpu \
+    SATORI_DEVICE=cuda HF_HOME=/opt/satori/model-cache/huggingface
+WORKDIR /opt/satori
+RUN python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu124 \
+      torch==2.6.0+cu124
+COPY requirements/gpu.lock requirements/gpu.lock
+RUN python -m pip install --no-cache-dir -r requirements/gpu.lock
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN python -m pip install --no-cache-dir --no-deps . \
+    && useradd --create-home --uid 10001 satori \
+    && mkdir -p /opt/satori/data /opt/satori/artifacts/state /opt/satori/model-cache \
+    && chown -R satori:satori /opt/satori
+COPY model_registry.example.json /opt/satori/model_registry.json
+USER 10001:10001
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD ["python", "-m", "satori.worker", "--healthcheck"]
+CMD ["python", "-m", "satori.worker"]
