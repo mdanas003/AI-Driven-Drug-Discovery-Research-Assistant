@@ -3,9 +3,17 @@ __pycache__/
 .venv/
 .env
 .cache/
+.uv-cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 data/
 artifacts/
 checkpoints/
+model-cache/
+build/
+dist/
+*.egg-info/
 *.pt
 *.pth
 *.ckpt
@@ -14,4 +22,4 @@ checkpoints/
 *.pdb
 *.pdbqt
 *.jsonl.tmp
-
+*.exe

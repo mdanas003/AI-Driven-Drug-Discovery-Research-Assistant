@@ -10,7 +10,7 @@
   "chembl_activity_limit": 10000,
   "seed": 17,
   "models": {
-    "target_ranker": "satori.relational_graph_attention.v1",
+    "target_ranker": "ultra",
     "molecule_generator": "ibm-research/GP-MoLFormer-Uniq@6eca879581e2302b4e1ab07bb02908636bddb4a2",
     "molecule_tokenizer": "ibm-research/MoLFormer-XL-both-10pct@361063d0ad524ef77cf39b08469f6be770dc550f",
     "conformer_model": "drugs-o3",

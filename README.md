@@ -1,41 +1,73 @@
-# Satori Drug Discovery Platform
+# Satori
 
-Satori is a modular research pipeline for target prioritization, ligand processing, molecular generation, optimization, triage, affinity prediction and docking. Its outputs are computational hypotheses, not experimental or clinical claims.
+Satori is a provenance-first research codebase for disease-target evidence, molecular design, multi-objective optimization, affinity modeling, and docking. Its outputs are research hypotheses, not experimental or clinical evidence.
 
-## Environment
+## Project status
 
-The development machine runs Python 3.13.1 and has an NVIDIA RTX 3050 Laptop GPU (6 GB VRAM); the updated C: budget was approximately 40 GB free at Phase 0. The project `.venv` contains RDKit 2026.3.6, NumPy 2.5.3, Pillow 12.3.0, PyTorch 2.14.1+cu130, Transformers 4.51.3, Safetensors and Tokenizers. The pinned GP-MoLFormer model/tokenizer are cached locally. ET-Flow's Linux/CUDA 12.1 toolchain remains separate and cloud-required.
+This repository is a local research prototype. It is **not deployed publicly**. Several advanced scientific stages remain blocked by incomplete target-specific data, model/checkpoint availability or rights, and missing validation protocols. An implemented interface or baseline is not evidence that a scientific model is trained or validated. See [current scientific status](docs/PROJECT_STATUS.md).
+
+The approved disease contexts are NSCLC, Alzheimer’s disease, and type 2 diabetes mellitus. The approved architecture remains intact: explicit protein/pocket conditioning for target-conditioned generation, ULTRA assessment behind the GFM interface, GraphFDM as primary optimizer, RL as a separately reported baseline, and separate Pareto objectives.
+
+## Quick start
+
+Requires Python 3.11–3.13. Create an isolated environment and install the project’s chemistry and API extras:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -e .
+python -m pip install -e ".[chemistry,ml,cloud-api,cloud-test]"
 ```
 
-## Three-disease target ingestion
+Run the tests:
 
-The example configuration contains NSCLC, Alzheimer disease, and type 2 diabetes mellitus. Ingestion writes separate disease datasets and manifests:
+```powershell
+python -m unittest discover -s tests -v
+```
+
+The optional dependencies are separated in `pyproject.toml`; the pinned worker environments are under `requirements/`. GPU/model dependencies are not installed by the quick-start command.
+
+## Target evidence ingestion
+
+The sample configuration includes the three approved disease identifiers. For a live Open Targets retrieval, install the package in the project environment and run:
 
 ```powershell
 $env:PYTHONPATH = "src"
 python -m satori.cli ingest-targets --config config.example.json --output-dir data/raw/open-targets
 ```
 
-Raw JSON API responses are cached under `data/raw/http-cache` and can be replayed offline by the source-client API. Dataset outputs use deterministic JSONL serialization and SHA-256 manifests. Per-source failures are explicit. External API access and model weight downloads require network access. Never put credentials in tracked configuration.
+Outputs and HTTP response caches go under `data/`, which is ignored by Git. Review the target-specific data policy before using retrieved records for training. Live data retrieval does not select a final target or establish training readiness.
 
-## Capabilities and scientific status
+## Local API development
 
-- Versioned target, evidence, ligand and candidate records; atomic datasets; dataset and split manifests.
-- Open Targets disease-to-target, UniProt, ChEMBL and RCSB PDB adapters.
-- RDKit molecule standardization, deterministic duplicate handling and explicit rejection reasons.
-- Time-aware relational graph attention and recurrent temporal architecture, revision-pinned GP-MoLFormer local inference, ET-Flow conformer adapter, GraphFDM blocker boundary, auditable chemistry triage and Pareto-front selection, cross-attention affinity architecture, XGBoost ligand-only baseline, Vina execution boundary, split utilities and evaluation metrics.
+Set a non-empty `SATORI_API_TOKEN` in the process environment, then run:
 
-The verified GP-MoLFormer base is unconditional; scaffold prompting is recorded and the returned structures are explicitly checked for scaffold retention. The base is not target/pocket conditioned, fragment constraints are blocked, and the ET-Flow stage has not run locally. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for phase gates and scientific blockers.
+```powershell
+$env:SATORI_API_TOKEN = "<local-development-token>"
+uvicorn satori.api:app --host 127.0.0.1 --port 8000
+```
 
-An adapter or architecture is not evidence that a model has been downloaded, trained, validated, or evaluated. Exact model blockers and phase status are tracked in `IMPLEMENTATION_STATUS.md` and `MODEL_FEASIBILITY.md`. Training and candidate generation require validated, provenance-preserving data and explicit assay/split policies.
+`GET /health` is unauthenticated and reports service capabilities. Job submission and job/result retrieval require a Bearer token. The API queues work; a separate worker must be running. SQLite is single-host only. Do not expose this prototype directly to the public internet.
 
-## Cloud runtime preparation
+## Repository map
 
-Cloud deployment scaffolding is in [CLOUD_ARCHITECTURE.md](CLOUD_ARCHITECTURE.md), with the reference procedure in [CLOUD_DEPLOYMENT.md](CLOUD_DEPLOYMENT.md). It provides FastAPI job submission, a single-host durable SQLite queue, CPU/GPU/ET-Flow/docking worker images, local/S3 artifacts, vector-store interfaces, and an explicit model registry. Containers are Linux-only build targets and do not require Docker on the development machine.
+- `src/satori/` — data, chemistry, target, generation, optimization, affinity, docking, provenance, API, and worker modules.
+- `tests/` — unit and contract tests; tests do not claim scientific model validation.
+- `tools/` — data retrieval utilities.
+- `requirements/` — pinned runtime dependency groups.
+- `docs/` — architecture, scientific policies/status, development, deployment, and external-GPU notes.
+- `Dockerfile.*` and `docker-compose.yml` — optional Linux deployment definitions; no AWS resources or public service are deployed.
 
-The API runtime is an optional extra: `pip install -e ".[cloud-api]"`. Start locally for development with `uvicorn satori.api:app --host 127.0.0.1 --port 8000`; start a CPU worker with `python -m satori.worker` and `SATORI_WORKER_QUEUE=cpu`. For production, follow the private-network/security steps in `CLOUD_DEPLOYMENT.md`. SQLite is single-host only. No scientific component is upgraded to complete by the existence of an endpoint/worker.
+## Key documentation
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Scientific status and blockers](docs/PROJECT_STATUS.md)
+- [Data specification](docs/science/DATASET_SPEC.md)
+- [Optimization policy](docs/science/OPTIMIZATION_POLICY.md)
+- [Model feasibility](docs/science/MODEL_FEASIBILITY.md)
+- [Zero-cost deployment status](docs/deployment/ZERO_COST_DEPLOYMENT.md)
+- [External GPU execution boundary](docs/deployment/EXTERNAL_GPU.md)
+- [Development and dependency groups](docs/development/DEPENDENCIES.md)
+
+## Scientific integrity
+
+No model result, checkpoint, or evaluation metric is inferred from an adapter, placeholder, or smoke test. Blocked stages must stay blocked; baseline outputs must remain labeled as baselines. See the disease-specific objective and assay policy before proposing candidates.

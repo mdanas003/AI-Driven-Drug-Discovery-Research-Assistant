@@ -42,17 +42,17 @@
       "blocker": "No disease-specific leakage-controlled training data, benchmark, or fitted checkpoint."
     },
     "target_gfm": {
-      "model_name": "Target graph foundation model",
-      "version": "unspecified",
+      "model_name": "ULTRA disease-to-target link prediction candidate",
+      "version": "assessment pending",
       "checkpoint_identifier": null,
-      "source": null,
+      "source": "https://github.com/DeepGraphLearning/ULTRA",
       "download_location": null,
       "artifact_path": null,
       "sha256": null,
-      "expected_environment": "Model-specific after reference selection",
-      "license": "Unknown until model selected",
+      "expected_environment": "ULTRA-pinned environment after artifact and benchmark gates pass",
+      "license": "Upstream code is MIT; verify the exact checkpoint and all source data licenses before use",
       "availability": "blocked",
-      "blocker": "Approved specification does not identify an exact compatible GFM/checkpoint."
+      "blocker": "Primary candidate selected, but exact checkpoint provenance/license, biomedical coverage, identifier mapping, and leakage-resistant evaluation have not passed."
     },
     "graphfdm": {
       "model_name": "GraphFDM primary optimizer",

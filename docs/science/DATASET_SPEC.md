@@ -22,11 +22,11 @@ Exact raw HTTP responses are content-addressed and checksum-verified in `data/ra
 - Keep all distinct assay measurements even when several rows map to the same standardized structure. Mark repeated standardized structures; resolve replicate/assay grouping only in later endpoint-specific modeling.
 - Explicit structure rejections: `MISSING_SMILES`, `INVALID_SMILES`, or a named standardization failure. Keep rejected source rows in the standardized output with reason.
 - Activity readiness is separate from structure validity. Report endpoint, value, units, relation, assay metadata and pChEMBL availability. Exact measurements, left/right-censored measurements, missing values, unsupported units, and incompatible assay contexts are counted separately.
-- The configurable physicochemical/PAINS/reactive chemistry gates in `OPTIMIZATION_POLICY.md` are candidate triage policy, not assertions of biological safety and not silent filters on ChEMBL training data.
+- The configurable physicochemical/PAINS/reactive chemistry gates in [`OPTIMIZATION_POLICY.md`](OPTIMIZATION_POLICY.md) are candidate triage policy, not assertions of biological safety and not silent filters on ChEMBL training data.
 
 ## Endpoint strata and potency labels
 
-Choose endpoints from the actual selected-target ChEMBL distribution under `OPTIMIZATION_POLICY.md`: valid comparable pChEMBL; then direct-binding Ki/Kd; inhibition IC50; mechanism-appropriate EC50. Keep distinct endpoints, assay formats, and mechanisms separate unless documented assay normalization supports combination. Preserve censoring. Report per-target/per-stratum counts and distribution statistics before proposing a target-specific threshold. No universal potency cutoff is allowed.
+Choose endpoints from the actual selected-target ChEMBL distribution under [`OPTIMIZATION_POLICY.md`](OPTIMIZATION_POLICY.md): valid comparable pChEMBL; then direct-binding Ki/Kd; inhibition IC50; mechanism-appropriate EC50. Keep distinct endpoints, assay formats, and mechanisms separate unless documented assay normalization supports combination. Preserve censoring. Report per-target/per-stratum counts and distribution statistics before proposing a target-specific threshold. No universal potency cutoff is allowed.
 
 ## Leakage-resistant splits
 
