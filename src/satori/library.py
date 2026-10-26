@@ -32,14 +32,23 @@ class ScreenResult:
     duplicates: list[tuple[str, str]] = field(default_factory=list)
 
 
-def load_csv(path: str | Path) -> list[tuple[str, str]]:
-    """Read (name, smiles) pairs from a CSV with 'name' and 'smiles' columns."""
+def load_table(path: str | Path) -> list[dict]:
+    """Read every column of a CSV that has at least 'name' and 'smiles'.
+
+    Files written by `fetch-chembl` carry extra columns such as `pchembl`
+    and `variant`, and callers that want them read the table directly.
+    """
     with open(path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         missing = {"name", "smiles"} - set(reader.fieldnames or [])
         if missing:
             raise ValueError(f"{path}: missing column(s) {sorted(missing)}")
-        return [(row["name"].strip(), row["smiles"].strip()) for row in reader]
+        return [{k: (v or "").strip() for k, v in row.items()} for row in reader]
+
+
+def load_csv(path: str | Path) -> list[tuple[str, str]]:
+    """Read just the (name, smiles) pairs from a library CSV."""
+    return [(row["name"], row["smiles"]) for row in load_table(path)]
 
 
 def evaluate(name: str, smiles: str) -> Compound:

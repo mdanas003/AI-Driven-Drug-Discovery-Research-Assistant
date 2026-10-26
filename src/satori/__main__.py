@@ -3,16 +3,27 @@
     python -m satori describe "<SMILES>" ...      # one or more molecules
     python -m satori screen library.csv [options] # a whole CSV library
     python -m satori fetch-chembl CHEMBL203       # real data for one target
+    python -m satori similar GEFITINIB lib.csv    # nearest neighbours
+    python -m satori cluster lib.csv              # group into series
 """
 
 import argparse
+import statistics
 import sys
 from pathlib import Path
 
 import requests
 
 from satori.chembl import DEFAULT_ACTIVE_THRESHOLD, build_dataset
-from satori.library import load_csv, rank, save_csv, screen
+from satori.library import load_csv, load_table, rank, save_csv, screen
+from satori.molecule import canonical_smiles, parse_smiles, strip_salts
+from satori.similarity import (
+    DEFAULT_CUTOFF,
+    cluster,
+    fingerprint,
+    fingerprint_library,
+    most_similar,
+)
 
 # Longer results are summarized; use --out to get every row.
 MAX_PRINTED_ROWS = 20
@@ -139,6 +150,132 @@ def cmd_fetch_chembl(args: argparse.Namespace) -> int:
     return 0
 
 
+def load_library(path: str) -> tuple[list[dict], list, bool]:
+    """Read a library CSV and fingerprint it, reporting what was skipped."""
+    rows, fps, skipped = fingerprint_library(load_table(path))
+    print(f"Library: {len(rows):,} molecules from {path}")
+    if skipped:
+        print(f"  skipped {len(skipped)} unreadable structure(s): {', '.join(skipped[:5])}")
+    return rows, fps, "pchembl" in (rows[0] if rows else {})
+
+
+def potency_column(row: dict, has_potency: bool) -> str:
+    """The potency cell for a results table, blank if the library has none."""
+    if not has_potency:
+        return ""
+    label = row.get("variant", "")
+    return f"  {row['pchembl']:>5}  {label}"
+
+
+def standard_form(smiles: str) -> str:
+    """One canonical spelling, salts removed, for comparing structures."""
+    return canonical_smiles(strip_salts(parse_smiles(smiles)))
+
+
+def resolve_query(query: str, rows: list[dict]) -> tuple[int | None, str]:
+    """Interpret the query as a SMILES string, or as a name in the library."""
+    try:
+        return None, standard_form(query)
+    except ValueError:
+        wanted = query.strip().lower()
+        for i, row in enumerate(rows):
+            if wanted in (row["name"].lower(), row.get("pref_name", "").lower()):
+                return i, standard_form(row["smiles"])
+        raise ValueError(
+            f"{query!r} is neither a valid SMILES string nor a name in the library"
+        ) from None
+
+
+def cmd_similar(args: argparse.Namespace) -> int:
+    try:
+        rows, fps, has_potency = load_library(args.csv)
+        in_library, smiles = resolve_query(args.query, rows)
+    except (OSError, ValueError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    if in_library is None:
+        print(f"Query: {smiles}")
+    else:
+        found = rows[in_library]
+        label = found.get("pref_name") or found["name"]
+        print(f"Query: {label} ({found['name']}) found in the library")
+    query_fp = fingerprint(strip_salts(parse_smiles(smiles)))
+
+    # The query's own structure is not a neighbour of itself. It can appear
+    # in several rows at once: the mutant file holds one row per variant.
+    hits = []
+    for hit in most_similar(query_fp, fps, top=args.top * 3 + 20, minimum=args.min):
+        if hit.similarity == 1.0 and standard_form(rows[hit.index]["smiles"]) == smiles:
+            continue
+        hits.append(hit)
+        if len(hits) == args.top:
+            break
+    if not hits:
+        print(f"\nNothing in the library reaches similarity {args.min}.")
+        return 0
+
+    header = f"\n{'rank':>4}  {'similarity':>10}  {'name':<16} {'label':<22}"
+    print(header + ("  pChEMBL  variant" if has_potency else ""))
+    for i, hit in enumerate(hits, start=1):
+        row = rows[hit.index]
+        label = (row.get("pref_name") or "")[:22]
+        print(
+            f"{i:>4}  {hit.similarity:>10.3f}  {row['name']:<16} {label:<22}"
+            f"{potency_column(row, has_potency)}"
+        )
+
+    if has_potency:
+        hit_median = statistics.median(float(rows[h.index]["pchembl"]) for h in hits)
+        all_median = statistics.median(float(r["pchembl"]) for r in rows)
+        difference = hit_median - all_median
+        print(
+            f"\nMedian pChEMBL of these {len(hits)} neighbours: {hit_median:.2f}"
+            f"  (whole library: {all_median:.2f}, difference {difference:+.2f})"
+        )
+        if difference > 0:
+            print("Neighbours more potent than the library: the similarity principle holding.")
+        else:
+            print("Neighbours no more potent than the library: the principle does not always hold.")
+    return 0
+
+
+def cmd_cluster(args: argparse.Namespace) -> int:
+    try:
+        rows, fps, has_potency = load_library(args.csv)
+    except (OSError, ValueError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    if not rows:
+        print("error: the library is empty", file=sys.stderr)
+        return 1
+
+    # Let the most potent molecules become cluster centres.
+    order = None
+    if has_potency:
+        order = sorted(range(len(rows)), key=lambda i: -float(rows[i]["pchembl"]))
+
+    print(f"Clustering at Tanimoto >= {args.cutoff} ...")
+    clusters = cluster(fps, cutoff=args.cutoff, order=order)
+    singletons = sum(1 for c in clusters if len(c) == 1)
+    print(f"  {len(clusters):,} clusters")
+    print(f"  {singletons:,} of them a single molecule on its own")
+    print(f"  largest holds {len(clusters[0]):,} molecules")
+
+    header = f"\n{'cluster':>7}  {'size':>6}  {'centre':<16} {'label':<22}"
+    print(header + ("  pChEMBL  variant" if has_potency else ""))
+    for i, group in enumerate(clusters[: args.top], start=1):
+        row = rows[group.centre]
+        label = (row.get("pref_name") or "")[:22]
+        print(
+            f"{i:>7}  {len(group):>6,}  {row['name']:<16} {label:<22}"
+            f"{potency_column(row, has_potency)}"
+        )
+    if len(clusters) > args.top:
+        print(f"  ... and {len(clusters) - args.top:,} more clusters")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="satori", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -166,6 +303,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--refresh", action="store_true", help="download again even if cached")
     p.set_defaults(func=cmd_fetch_chembl)
+
+    p = sub.add_parser("similar", help="find the molecules most similar to a query")
+    p.add_argument("query", help="a SMILES string, or a name present in the library")
+    p.add_argument("csv", help="library CSV with 'name' and 'smiles' columns")
+    p.add_argument("--top", type=int, default=10, help="how many neighbours (default: 10)")
+    p.add_argument("--min", type=float, default=0.0, help="minimum similarity (default: 0)")
+    p.set_defaults(func=cmd_similar)
+
+    p = sub.add_parser("cluster", help="group a library into series of similar molecules")
+    p.add_argument("csv", help="library CSV with 'name' and 'smiles' columns")
+    p.add_argument(
+        "--cutoff",
+        type=float,
+        default=DEFAULT_CUTOFF,
+        help=f"similarity needed to join a cluster (default: {DEFAULT_CUTOFF})",
+    )
+    p.add_argument("--top", type=int, default=10, help="how many clusters to show (default: 10)")
+    p.set_defaults(func=cmd_cluster)
     return parser
 
 

@@ -136,6 +136,86 @@ If we had left these mixed together, every one of those numbers would have been 
 - **72–88% "active" is not realistic.** Chemists mostly publish compounds that worked, so ChEMBL is biased toward actives. In a real screen, well under 1% of molecules are active. Any model trained on this data inherits that bias, and the mutant set is the more biased of the two: people test mutants with drugs already known to work on them.
 - **`screen` still ranks by QED only**, so it ignores the potency we just downloaded. Combining structure with measured activity is what the next steps are for.
 
+## Step 4: fingerprints, similarity and clustering
+
+The oldest useful idea in medicinal chemistry is that **similar molecules tend to have similar activity**. To use it, a computer needs a way to measure "similar".
+
+### Fingerprints
+
+A **fingerprint** turns a molecule into a long row of yes/no bits. We use **Morgan fingerprints**, also called **ECFP4**: look at every atom, take in the neighbourhood around it out to two bonds away, and switch on a bit for each distinct neighbourhood found. The result is 2,048 bits saying which chemical fragments the molecule contains.
+
+### Tanimoto similarity
+
+Comparing two fingerprints is then simple arithmetic:
+
+```
+similarity = shared bits / bits set in either molecule
+```
+
+This is the **Tanimoto** coefficient, from 0.0 to 1.0. As a rough guide:
+
+| Score | Meaning |
+|-------|---------|
+| 1.0 | identical fingerprints |
+| above 0.7 | clearly the same chemical series |
+| 0.4 – 0.7 | a family resemblance |
+| below 0.3 | unrelated |
+
+Gefitinib and erlotinib, two EGFR drugs that look alike to a chemist, score **0.41**. Gefitinib and ethanol score **0.03**.
+
+Salts no longer matter here: because structures are stripped first (Step 3), a drug and its hydrochloride salt score exactly 1.0.
+
+### Finding neighbours
+
+```powershell
+.venv\Scripts\python -m satori similar GEFITINIB data\chembl\CHEMBL203_IC50_wild_type.csv --top 8
+```
+
+The query can be a SMILES string or any name in the library. Searching all 8,450 wild-type molecules takes about 3 seconds:
+
+```
+rank  similarity  name             pChEMBL
+   1       0.919  CHEMBL14699         8.00
+   2       0.857  CHEMBL4448162       9.00
+   3       0.857  CHEMBL299672        7.15
+   4       0.844  CHEMBL291514        7.10
+   5       0.818  CHEMBL4858176       4.60
+...
+Median pChEMBL of these 8 neighbours: 7.58  (whole library: 6.96, difference +0.62)
+```
+
+That last line is the similarity principle being tested rather than assumed. These neighbours really are more potent than the library as a whole. Run the same search for osimertinib in the mutant file and the difference comes out **negative**: the principle is a useful prior, not a law, so Satori prints which way the data fell instead of claiming the win.
+
+### Activity cliffs: where the principle breaks
+
+Look at ranks 1 and 5 above. Both are gefitinib with a single atom changed:
+
+| Molecule | Change from gefitinib | pChEMBL |
+|---|---|---|
+| Gefitinib | — | 7.69 |
+| `CHEMBL14699` | one CH₂ shorter in the linker | 8.00 |
+| `CHEMBL4858176` | morpholine oxygen → selenium | 4.60 |
+
+The selenium version is **0.818 similar and roughly 1,200 times less potent**. This is an **activity cliff**: a tiny structural change falling off a potency cliff. Cliffs are exactly where models trained on similarity fail, and they are common. (Honest caveat: that number comes from a single measurement, where Step 3 warned that labs disagree.)
+
+### Clustering: how many *different* molecules do we really have?
+
+8,450 molecules does not mean 8,450 ideas. Most come from papers exploring one scaffold with small variations.
+
+```powershell
+.venv\Scripts\python -m satori cluster data\chembl\CHEMBL203_IC50_wild_type.csv
+```
+
+```
+1,864 clusters
+784 of them a single molecule on its own
+largest holds 164 molecules
+```
+
+So the real diversity is roughly **1,900 chemical series**, not 8,450 molecules. This matters enormously for Step 5: if a model is trained on part of a 164-molecule series and tested on the rest, it scores brilliantly while having learned nothing transferable. Honest testing has to split by cluster, not by molecule.
+
+Clustering uses **sphere exclusion**: walk the molecules in order, let each unclaimed one found a cluster, and give it every unclaimed molecule within the cutoff. Satori walks the most potent molecules first, so each cluster centre is a compound worth looking at. It only ever holds one row of comparisons in memory, which matters because a full distance matrix for 8,450 molecules would be 36 million numbers.
+
 ## Run it
 
 Requires Python 3.11 or newer.
@@ -168,6 +248,13 @@ Download and clean real EGFR data from ChEMBL (needs internet the first time; la
 .venv\Scripts\python -m satori screen data\chembl\CHEMBL203_IC50_wild_type.csv --drug-like --top 20
 ```
 
+Find the molecules most similar to a drug, or group the library into chemical series:
+
+```powershell
+.venv\Scripts\python -m satori similar GEFITINIB data\chembl\CHEMBL203_IC50_wild_type.csv
+.venv\Scripts\python -m satori cluster data\chembl\CHEMBL203_IC50_wild_type.csv
+```
+
 Run the tests:
 
 ```powershell
@@ -179,7 +266,8 @@ Run the tests:
 - [`src/satori/molecule.py`](src/satori/molecule.py): read SMILES, compute properties, check Lipinski (Step 1).
 - [`src/satori/library.py`](src/satori/library.py): load a CSV, screen, rank, save (Step 2).
 - [`src/satori/chembl.py`](src/satori/chembl.py): download, clean and aggregate ChEMBL activity data (Step 3).
-- [`src/satori/__main__.py`](src/satori/__main__.py): the command line tool (`describe`, `screen`, `fetch-chembl`).
+- [`src/satori/similarity.py`](src/satori/similarity.py): fingerprints, Tanimoto similarity, clustering (Step 4).
+- [`src/satori/__main__.py`](src/satori/__main__.py): the command line tool (`describe`, `screen`, `fetch-chembl`, `similar`, `cluster`).
 - [`examples/known_drugs.csv`](examples/known_drugs.csv): 16 rows of known drugs, including one duplicate and one broken row on purpose.
 - [`tests/`](tests/): checks that the numbers and behaviour are right.
 
@@ -188,7 +276,7 @@ Run the tests:
 1. **Molecules**: read one molecule, compute properties, check drug-likeness. *(done)*
 2. **Many molecules**: load a CSV of compounds, filter and rank them, save the results. *(done)*
 3. **Real data**: download known active compounds for one target (EGFR, a lung cancer target) from ChEMBL. *(done)*
-4. **Similarity search**: fingerprints, "find molecules similar to this drug".
-5. **First ML model**: predict activity from structure with scikit-learn, using an honest train/test split.
+4. **Similarity search**: fingerprints, "find molecules similar to this drug", and clustering. *(done)*
+5. **First ML model**: predict activity from structure with scikit-learn, split by cluster so the score is honest.
 6. **Targets**: which proteins matter for a disease (Open Targets).
 7. **Later**: web UI, API, docking and 3D structure, generative models, GPU, deployment. Each one is added only when the step before it works.
