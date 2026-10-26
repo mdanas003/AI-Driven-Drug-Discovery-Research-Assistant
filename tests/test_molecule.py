@@ -1,7 +1,7 @@
 import pytest
 
 from satori.__main__ import EXAMPLES
-from satori.molecule import describe, lipinski, parse_smiles
+from satori.molecule import canonical_smiles, describe, lipinski, parse_smiles
 
 
 def test_aspirin_properties():
@@ -9,6 +9,13 @@ def test_aspirin_properties():
     assert props["molecular_weight"] == pytest.approx(180.16, abs=0.01)
     assert props["h_bond_donors"] == 1
     assert props["rings"] == 1
+    assert 0 < props["qed"] < 1
+
+
+def test_canonical_smiles_ignores_spelling():
+    a = canonical_smiles(parse_smiles("CC(=O)O"))
+    b = canonical_smiles(parse_smiles("OC(C)=O"))
+    assert a == b
 
 
 @pytest.mark.parametrize("name", ["aspirin", "caffeine", "ibuprofen"])

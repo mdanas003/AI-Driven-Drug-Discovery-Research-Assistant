@@ -7,7 +7,7 @@ chemists use to judge whether something could work as an oral drug.
 """
 
 from rdkit import Chem, RDLogger
-from rdkit.Chem import Descriptors
+from rdkit.Chem import QED, Descriptors
 
 # RDKit prints its own warnings for bad SMILES; we raise a clear error instead.
 RDLogger.DisableLog("rdApp.*")
@@ -19,6 +19,12 @@ def parse_smiles(smiles: str) -> Chem.Mol:
     if mol is None:
         raise ValueError(f"Not a valid SMILES string: {smiles!r}")
     return mol
+
+
+def canonical_smiles(mol: Chem.Mol) -> str:
+    """One standard spelling per molecule, so the same molecule written two
+    different ways ("OC(=O)C" and "CC(O)=O") compares equal."""
+    return Chem.MolToSmiles(mol)
 
 
 def describe(mol: Chem.Mol) -> dict[str, float]:
@@ -36,6 +42,9 @@ def describe(mol: Chem.Mol) -> dict[str, float]:
         # Polar surface area (square angstroms). Relates to crossing cell membranes.
         "tpsa": round(Descriptors.TPSA(mol), 2),
         "rings": Descriptors.RingCount(mol),
+        # Quantitative Estimate of Drug-likeness (Bickerton 2012): a single
+        # 0-1 score blending the properties above. Higher = more drug-like.
+        "qed": round(QED.qed(mol), 3),
     }
 
 
