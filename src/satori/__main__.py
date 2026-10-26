@@ -2,12 +2,20 @@
 
     python -m satori describe "<SMILES>" ...      # one or more molecules
     python -m satori screen library.csv [options] # a whole CSV library
+    python -m satori fetch-chembl CHEMBL203       # real data for one target
 """
 
 import argparse
 import sys
+from pathlib import Path
 
+import requests
+
+from satori.chembl import DEFAULT_ACTIVE_THRESHOLD, build_dataset
 from satori.library import load_csv, rank, save_csv, screen
+
+# Longer results are summarized; use --out to get every row.
+MAX_PRINTED_ROWS = 20
 from satori.molecule import describe, lipinski, parse_smiles
 
 EXAMPLES = {
@@ -66,13 +74,15 @@ def cmd_screen(args: argparse.Namespace) -> int:
         print(f"  skipped duplicate: {name} (same molecule as {original})")
 
     print(f"\n{'rank':>4}  {'name':<16} {'QED':>5}  {'MW':>8}  {'logP':>5}  Lipinski")
-    for i, c in enumerate(ranked, start=1):
+    for i, c in enumerate(ranked[:MAX_PRINTED_ROWS], start=1):
         p = c.props
         verdict = "PASS" if c.drug_like else "FAIL"
         print(
             f"{i:>4}  {c.name:<16} {p['qed']:>5.3f}  {p['molecular_weight']:>8.2f}"
             f"  {p['logp']:>5.2f}  {verdict}"
         )
+    if len(ranked) > MAX_PRINTED_ROWS:
+        print(f"  ... and {len(ranked) - MAX_PRINTED_ROWS} more (use --out to save them all)")
 
     if args.out:
         if not ranked:
@@ -80,6 +90,41 @@ def cmd_screen(args: argparse.Namespace) -> int:
             return 1
         save_csv(ranked, args.out)
         print(f"\nSaved {len(ranked)} compounds to {args.out}")
+    return 0
+
+
+def cmd_fetch_chembl(args: argparse.Namespace) -> int:
+    def progress(done: int, total: int) -> None:
+        print(f"\r  downloaded {done:,} / {total:,} measurements", end="", flush=True)
+
+    print(f"Fetching {args.type} data for {args.target} from ChEMBL...")
+    try:
+        summary = build_dataset(
+            args.target,
+            args.type,
+            Path(args.out_dir),
+            active_threshold=args.threshold,
+            refresh=args.refresh,
+            progress=progress,
+        )
+    except (requests.RequestException, RuntimeError, ValueError) as err:
+        print(f"\nerror: {err}", file=sys.stderr)
+        return 1
+
+    source = summary["source"]
+    print(f"\n\n{source['target_name']} ({source['target_chembl_id']}), {source['chembl_release']}")
+    print(f"  downloaded {source['downloaded_at']}")
+    print(f"  raw measurements:  {summary['raw_measurements']:>7,}")
+    for reason, count in summary["dropped"].items():
+        print(f"    dropped {count:>7,}  {reason}")
+    print(f"  kept measurements: {summary['kept_measurements']:>7,}")
+    print(f"  unique molecules:  {summary['molecules']:>7,}")
+    print(
+        f"  actives (pChEMBL >= {summary['active_threshold_pchembl']}):"
+        f" {summary['actives']:,} ({summary['actives'] / summary['molecules']:.0%})"
+    )
+    stem = Path(args.out_dir) / f"{args.target}_{args.type}"
+    print(f"\nSaved {stem}.csv (one row per molecule) and {stem}.json (provenance)")
     return 0
 
 
@@ -97,6 +142,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--top", type=int, help="keep only the best N")
     p.add_argument("--out", help="write the ranked results to this CSV")
     p.set_defaults(func=cmd_screen)
+
+    p = sub.add_parser("fetch-chembl", help="download and clean activity data for a target")
+    p.add_argument("target", help="ChEMBL target ID, e.g. CHEMBL203 (EGFR)")
+    p.add_argument("--type", default="IC50", help="activity type (default: IC50)")
+    p.add_argument("--out-dir", default="data/chembl", help="where to save (default: data/chembl)")
+    p.add_argument(
+        "--threshold",
+        type=float,
+        default=DEFAULT_ACTIVE_THRESHOLD,
+        help=f"pChEMBL cut-off for 'active' (default: {DEFAULT_ACTIVE_THRESHOLD})",
+    )
+    p.add_argument("--refresh", action="store_true", help="download again even if cached")
+    p.set_defaults(func=cmd_fetch_chembl)
     return parser
 
 
