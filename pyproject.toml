@@ -1,39 +1,22 @@
 [build-system]
-requires = ["setuptools>=75", "wheel"]
+requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "satori-drug-discovery"
+name = "satori"
 version = "0.1.0"
-description = "Modular, provenance-first AI drug discovery research pipeline"
+description = "A step-by-step computational drug discovery project."
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
-license = { text = "Proprietary research prototype; model/data licenses remain per-source" }
-dependencies = []
+requires-python = ">=3.11"
+dependencies = [
+    "rdkit>=2024.3",
+]
 
 [project.optional-dependencies]
-chemistry = ["rdkit>=2024.3"]
-ml = ["torch>=2.6", "numpy>=2.0"]
-generation = ["transformers>=4.51", "accelerate>=1.5", "safetensors>=0.5"]
-etflow = ["etflow>=0.1"]
-affinity = ["torch>=2.6", "numpy>=2.0", "biopython>=1.84"]
-retrieval = ["sentence-transformers>=4.0"]
-baseline = ["rdkit>=2024.3", "xgboost>=2.1", "numpy>=2.0"]
-cloud-api = ["fastapi==0.115.12", "uvicorn[standard]==0.34.2"]
-cloud-storage = ["boto3==1.37.38"]
-cloud-test = ["httpx==0.28.1"]
-dev = ["ruff>=0.11", "mypy>=1.15"]
-
-[project.scripts]
-satori = "satori.cli:main"
-satori-worker = "satori.worker:main"
+dev = ["pytest>=8"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.ruff]
-line-length = 100
-target-version = "py311"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+[tool.pytest.ini_options]
+testpaths = ["tests"]

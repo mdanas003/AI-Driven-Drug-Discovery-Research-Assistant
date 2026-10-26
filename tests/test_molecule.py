@@ -1,0 +1,29 @@
+import pytest
+
+from satori.__main__ import EXAMPLES
+from satori.molecule import describe, lipinski, parse_smiles
+
+
+def test_aspirin_properties():
+    props = describe(parse_smiles(EXAMPLES["aspirin"]))
+    assert props["molecular_weight"] == pytest.approx(180.16, abs=0.01)
+    assert props["h_bond_donors"] == 1
+    assert props["rings"] == 1
+
+
+@pytest.mark.parametrize("name", ["aspirin", "caffeine", "ibuprofen"])
+def test_common_drugs_pass_lipinski(name):
+    passes, _ = lipinski(describe(parse_smiles(EXAMPLES[name])))
+    assert passes
+
+
+def test_cyclosporine_fails_lipinski():
+    passes, violations = lipinski(describe(parse_smiles(EXAMPLES["cyclosporine"])))
+    assert not passes
+    assert any(v.startswith("molecular_weight") for v in violations)
+
+
+@pytest.mark.parametrize("bad", ["not-a-molecule", "", "C1CC"])
+def test_invalid_smiles_raises(bad):
+    with pytest.raises(ValueError):
+        parse_smiles(bad)
