@@ -118,13 +118,24 @@ def cmd_fetch_chembl(args: argparse.Namespace) -> int:
     for reason, count in summary["dropped"].items():
         print(f"    dropped {count:>7,}  {reason}")
     print(f"  kept measurements: {summary['kept_measurements']:>7,}")
-    print(f"  unique molecules:  {summary['molecules']:>7,}")
-    print(
-        f"  actives (pChEMBL >= {summary['active_threshold_pchembl']}):"
-        f" {summary['actives']:,} ({summary['actives'] / summary['molecules']:.0%})"
-    )
-    stem = Path(args.out_dir) / f"{args.target}_{args.type}"
-    print(f"\nSaved {stem}.csv (one row per molecule) and {stem}.json (provenance)")
+
+    threshold = summary["active_threshold_pchembl"]
+    for label, part in (("normal (wild-type)", "wild_type"), ("mutant forms", "mutant")):
+        counts = summary[part]
+        if not counts["molecules"]:
+            continue
+        share = counts["actives"] / counts["molecules"]
+        print(f"\n  {label}: {counts['molecules']:,} molecules")
+        print(f"    active (pChEMBL >= {threshold}): {counts['actives']:,} ({share:.0%})")
+        variants = counts.get("variants")
+        if variants:
+            top = ", ".join(f"{name} ({n:,})" for name, n in list(variants.items())[:5])
+            print(f"    {len(variants)} distinct variants, most measured: {top}")
+
+    print()
+    for path in summary["files"].values():
+        print(f"Saved {path}")
+    print(f"Saved {Path(args.out_dir) / f'{args.target}_{args.type}'}.json (provenance)")
     return 0
 
 

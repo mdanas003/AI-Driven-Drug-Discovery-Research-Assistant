@@ -8,9 +8,12 @@ chemists use to judge whether something could work as an oral drug.
 
 from rdkit import Chem, RDLogger
 from rdkit.Chem import QED, Descriptors
+from rdkit.Chem.MolStandardize import rdMolStandardize
 
 # RDKit prints its own warnings for bad SMILES; we raise a clear error instead.
 RDLogger.DisableLog("rdApp.*")
+
+_largest_fragment = rdMolStandardize.LargestFragmentChooser()
 
 
 def parse_smiles(smiles: str) -> Chem.Mol:
@@ -19,6 +22,18 @@ def parse_smiles(smiles: str) -> Chem.Mol:
     if mol is None:
         raise ValueError(f"Not a valid SMILES string: {smiles!r}")
     return mol
+
+
+def strip_salts(mol: Chem.Mol) -> Chem.Mol:
+    """Keep only the largest piece of a molecule.
+
+    Drugs are often stored with a counter-ion or water attached, written in
+    SMILES as separate pieces joined by a dot: dacomitinib is stored as
+    "...CN1CCCCC1.O", the drug plus a water molecule. Only the drug part
+    binds the protein, so the extra pieces would distort every property we
+    compute. A molecule that is a single piece already is returned unchanged.
+    """
+    return mol if "." not in Chem.MolToSmiles(mol) else _largest_fragment.choose(mol)
 
 
 def canonical_smiles(mol: Chem.Mol) -> str:

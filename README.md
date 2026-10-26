@@ -73,17 +73,20 @@ So far every number was *calculated*. Now we use *measured* data.
 - **IC50** is the concentration of a compound needed to block half of the protein's activity. Lower is more potent.
 - **pChEMBL** puts that on a simple scale: `-log10(IC50 in molar)`. pChEMBL 6 = 1 µM, 7 = 100 nM, 9 = 1 nM. Higher is more potent, and each +1 is **ten times** more potent.
 
-`fetch-chembl` downloads every IC50 measurement for a target, cleans the data, keeps one row per molecule (the **median** of its measurements) and labels it **active** if pChEMBL ≥ 6. It saves three files in `data/chembl/`:
+`fetch-chembl` downloads every IC50 measurement for a target, cleans the data, splits it by which form of the protein was tested, keeps one row per molecule (the **median** of its measurements) and labels it **active** if pChEMBL ≥ 6. It saves four files in `data/chembl/`:
 
 | File | Contents |
 |------|----------|
-| `CHEMBL203_IC50_raw.csv`  | every downloaded measurement, kept so we never need to download again |
-| `CHEMBL203_IC50.csv`      | one row per molecule: `name, pref_name, smiles, pchembl, n_measurements, spread, active` |
-| `CHEMBL203_IC50.json`     | **provenance**: ChEMBL release, download date, threshold, and how many rows were dropped and why |
+| `CHEMBL203_IC50_raw.csv`       | every downloaded measurement, kept so we never need to download again |
+| `CHEMBL203_IC50_wild_type.csv` | the normal protein, one row per molecule |
+| `CHEMBL203_IC50_mutant.csv`    | the mutant forms, with a `variant` column saying which |
+| `CHEMBL203_IC50.json`          | **provenance**: ChEMBL release, download date, threshold, and how many rows were dropped and why |
+
+Each molecule row is `name, pref_name, smiles, variant, pchembl, n_measurements, spread, active`.
 
 The provenance file matters. ChEMBL publishes a new release every few months, so "EGFR data" changes over time. A result is only reproducible if you know exactly which data produced it.
 
-### What the real data looks like (ChEMBL 37, October 2026)
+### Cleaning: what we throw away, and why
 
 ```
 raw measurements:    26,600
@@ -92,24 +95,46 @@ raw measurements:    26,600
   dropped  1,255  not a binding/biochemical assay (cell assays are not comparable)
   dropped     47  no structure
 kept measurements:   16,084
-unique molecules:    10,381
-actives (pChEMBL >= 6): 7,885 (76%)
 ```
 
-The approved EGFR drugs are all in there: afatinib (8.5), dacomitinib (8.2), lapatinib (7.7), osimertinib (7.7), gefitinib (7.5) and erlotinib (7.4).
+**40% of the raw measurements were unusable** for a fair comparison. Cleaning is not optional, and every rule changes the answer, so the counts are recorded.
 
-Lessons from real data:
+We keep only **binding assays**, measured against the purified protein. The same molecule measured 41 nM against purified EGFR and 300 nM in living cells; mixing the two would compare apples with oranges.
 
-- **40% of the raw measurements were unusable** for a clean comparison. Cleaning is not optional, and every rule we apply changes the answer, so the reasons are recorded.
-- **We keep only binding assays.** The same molecule can measure 41 nM against the purified protein and 300 nM in living cells. Mixing the two would compare apples with oranges.
-- **Measurements disagree.** Of the 3,127 molecules measured more than once, half have a spread of 0.87 log units or more (a seven-fold difference), and erlotinib's 77 measurements span 6.5 log units. That is why we take the median and record the `spread`.
-- **76% "active" is not realistic.** Chemists mostly publish compounds that worked, so ChEMBL is biased toward actives. In a real screen, well under 1% of random molecules are active. Any model trained on this data will inherit that bias.
+We also **strip salts and hydrates**. Drugs are often stored with a counter-ion or water attached, written in SMILES as separate pieces joined by a dot (dacomitinib is stored as the drug `.O`, plus a water molecule). Only the drug binds the protein, so we keep the largest piece. A useful side effect: a drug and its salt form have different ChEMBL IDs but the same stripped structure, so they now merge into one row with both their measurements.
 
-### Known limitations, to fix in later steps
+### Why mutants must be kept separate
 
-- **Mutant EGFR is mixed with normal EGFR.** Many assays test cancer mutants (such as T790M, which osimertinib was designed to hit). That explains part of the large spread. We should separate them.
-- **Salts and hydrates are not stripped.** 182 molecules have a `.` in their SMILES (for example dacomitinib is stored with a water molecule), which slightly distorts their calculated properties.
-- **`screen` still ranks by QED only**, so it ignores the potency we just downloaded. The top-ranked molecules are drug-like, but not necessarily potent. Combining the two is what the next steps are for.
+A mutation is a single changed amino acid in the protein. `T790M` means position 790 changed from threonine to methionine. One such change can alter how tightly a drug binds by a thousandfold, so in practice these are **different proteins**. ChEMBL names the mutation in a dedicated field for newer assays and only in the free-text description for older ones, so we read both.
+
+| | Molecules | Active (pChEMBL ≥ 6) |
+|---|---|---|
+| Normal (wild-type) EGFR | 8,450 | 6,113 (72%) |
+| Mutant EGFR (13 variants) | 4,060 | 3,573 (88%) |
+
+The most-measured mutants are `L858R+T790M` (1,805 molecules), `L858R` (619) and `C797S+L858R+T790M` (574).
+
+Splitting them apart makes the history of EGFR drugs visible in the data:
+
+| Drug | Normal EGFR | L858R | T790M | L858R+T790M | C797S+L858R+T790M |
+|------|------------:|------:|------:|------------:|------------------:|
+| Gefitinib (1st generation)   | 7.69 | 8.96 | 5.76 | 5.99 | 6.51 |
+| Afatinib (2nd generation)    | 8.50 | 9.40 | 8.58 | 7.75 | 6.67 |
+| Osimertinib (3rd generation) | 6.85 | 8.91 | 8.27 | 8.41 | 6.94 |
+
+Read it as a story, remembering that +1 means ten times more potent:
+
+- **Gefitinib** works well on normal EGFR and on `L858R`, the mutation that drives many lung cancers. Then tumours acquire `T790M` and gefitinib loses about a thousandfold of its potency (8.96 → 5.99). That is drug resistance, and it is the clinical reality: patients relapse.
+- **Osimertinib** was designed for exactly that problem. It is *more* potent on the resistant double mutant (8.41) than on the normal protein (6.85). Being weaker on normal EGFR is deliberate: normal EGFR is in healthy skin and gut, so hitting it causes the rash and diarrhoea that limit the older drugs.
+- **`C797S`** is where osimertinib's own potency collapses (8.41 → 6.94). That is the next resistance mutation, and finding drugs for it is an open research problem today.
+
+If we had left these mixed together, every one of those numbers would have been averaged into mush. This is why the step was worth doing before any modelling.
+
+### The data is still biased, and that matters
+
+- **Measurements disagree.** Of the 1,229 wild-type molecules measured more than once, half have a spread of 0.68 log units or more. Gefitinib's 54 wild-type measurements span 5.36 log units. Different labs, assay conditions and protein batches genuinely differ, so we keep the median and record the `spread` so it is never invisible.
+- **72–88% "active" is not realistic.** Chemists mostly publish compounds that worked, so ChEMBL is biased toward actives. In a real screen, well under 1% of molecules are active. Any model trained on this data inherits that bias, and the mutant set is the more biased of the two: people test mutants with drugs already known to work on them.
+- **`screen` still ranks by QED only**, so it ignores the potency we just downloaded. Combining structure with measured activity is what the next steps are for.
 
 ## Run it
 
@@ -140,7 +165,7 @@ Download and clean real EGFR data from ChEMBL (needs internet the first time; la
 
 ```powershell
 .venv\Scripts\python -m satori fetch-chembl CHEMBL203
-.venv\Scripts\python -m satori screen data\chembl\CHEMBL203_IC50.csv --drug-like --top 20
+.venv\Scripts\python -m satori screen data\chembl\CHEMBL203_IC50_wild_type.csv --drug-like --top 20
 ```
 
 Run the tests:
