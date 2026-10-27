@@ -21,6 +21,7 @@ series we are about to make?* Satori reports both, because the gap
 between them is the honest measure of how much the easy number flatters.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -33,6 +34,10 @@ from satori.similarity import Cluster
 
 DEFAULT_TEST_FRACTION = 0.2
 DEFAULT_TREES = 300
+# One split gives one number, and that number moves depending on which
+# molecules happened to land in the test set. Repeating the whole
+# experiment is the only way to know how much it moves.
+DEFAULT_REPEATS = 5
 
 
 def features(fingerprints: list) -> np.ndarray:
@@ -107,6 +112,11 @@ class Scores:
         actually needs when choosing which molecules to make next.
     baseline_mae: the error from always predicting the training average.
         A model that cannot beat this has learned nothing.
+    top_hit_rate: take the 10% of molecules the model likes best. What
+        share of them are genuinely among the 10% most potent? Picking at
+        random would give 0.10, so this is the number a screening decision
+        actually rests on: if we make what the model recommends, how often
+        is it right?
     """
 
     split: str
@@ -117,40 +127,51 @@ class Scores:
     rmse: float
     spearman: float
     baseline_mae: float
+    top_hit_rate: float = float("nan")
 
     @property
     def beats_baseline(self) -> bool:
         return self.mae < self.baseline_mae
 
 
-def train(
-    x: np.ndarray, y: np.ndarray, trees: int = DEFAULT_TREES, seed: int = 0
-) -> RandomForestRegressor:
-    forest = RandomForestRegressor(n_estimators=trees, random_state=seed, n_jobs=-1)
-    forest.fit(x, y)
-    return forest
+def top_hit_rate(actual: np.ndarray, predicted: np.ndarray, share: float = 0.1) -> float:
+    """Of the molecules the model ranks highest, how many truly belong there?"""
+    how_many = max(1, round(len(actual) * share))
+    best_predicted = set(np.argsort(predicted)[-how_many:].tolist())
+    truly_best = set(np.argsort(actual)[-how_many:].tolist())
+    return len(best_predicted & truly_best) / how_many
+
+
+def random_forest(trees: int = DEFAULT_TREES, seed: int = 0) -> RandomForestRegressor:
+    """The Step 5 model, and the reference every other model must beat."""
+    return RandomForestRegressor(n_estimators=trees, random_state=seed, n_jobs=-1)
 
 
 def evaluate(
     x: np.ndarray,
     y: np.ndarray,
     split: Split,
-    trees: int = DEFAULT_TREES,
+    model_for: Callable[[int], object] | None = None,
     seed: int = 0,
-) -> tuple[RandomForestRegressor, Scores]:
-    """Train on the split's training half, score on its held-out half."""
+) -> tuple[object, Scores]:
+    """Train on the split's training half, score on its held-out half.
+
+    `model_for` builds the model from a seed, so any scikit-learn style
+    regressor can be measured under exactly the same protocol.
+    """
     if not split.train or not split.test:
         raise ValueError(f"The {split.name} split left one side empty.")
 
-    forest = train(x[split.train], y[split.train], trees, seed)
-    predicted = forest.predict(x[split.test])
+    model = (model_for or random_forest)(seed)
+    model.fit(x[split.train], y[split.train])
+    predicted = model.predict(x[split.test])
     actual = y[split.test]
 
     # The honest floor: always predict the training average.
     baseline = np.full_like(actual, y[split.train].mean())
     correlation = spearmanr(actual, predicted).statistic if len(actual) > 2 else float("nan")
 
-    return forest, Scores(
+    return model, Scores(
         split=split.name,
         n_train=len(split.train),
         n_test=len(split.test),
@@ -159,4 +180,102 @@ def evaluate(
         rmse=round(float(root_mean_squared_error(actual, predicted)), 3),
         spearman=round(float(correlation), 3),
         baseline_mae=round(float(mean_absolute_error(actual, baseline)), 3),
+        top_hit_rate=round(top_hit_rate(actual, predicted), 3),
     )
+
+
+@dataclass
+class Spread:
+    """One metric across repeated runs: its average and how much it moved."""
+
+    mean: float
+    sd: float
+    low: float
+    high: float
+
+    def __str__(self) -> str:
+        return f"{self.mean:.3f} +/- {self.sd:.3f}"
+
+
+def spread_of(values: list[float]) -> Spread:
+    """Average and variation of one metric. numpy, not statistics, because a
+    metric can legitimately be undefined (Spearman needs three points) and
+    nan must pass through rather than raise."""
+    numbers = np.asarray(values, dtype=float)
+    if numbers.size == 0:
+        return Spread(float("nan"), float("nan"), float("nan"), float("nan"))
+    return Spread(
+        mean=round(float(numbers.mean()), 3),
+        # Sample standard deviation; a single run has no spread to report.
+        sd=round(float(numbers.std(ddof=1)), 3) if numbers.size > 1 else 0.0,
+        low=round(float(numbers.min()), 3),
+        high=round(float(numbers.max()), 3),
+    )
+
+
+@dataclass
+class RepeatedScores:
+    """The same experiment run several times, so the score has a range."""
+
+    split: str
+    runs: list[Scores]
+
+    @property
+    def repeats(self) -> int:
+        return len(self.runs)
+
+    def _of(self, metric: str) -> Spread:
+        return spread_of([getattr(run, metric) for run in self.runs])
+
+    @property
+    def r2(self) -> Spread:
+        return self._of("r2")
+
+    @property
+    def mae(self) -> Spread:
+        return self._of("mae")
+
+    @property
+    def spearman(self) -> Spread:
+        return self._of("spearman")
+
+    @property
+    def baseline_mae(self) -> Spread:
+        return self._of("baseline_mae")
+
+    @property
+    def top_hit_rate(self) -> Spread:
+        return self._of("top_hit_rate")
+
+    @property
+    def beats_baseline(self) -> bool:
+        """True only if every repeat beat the baseline, not just the average."""
+        return all(run.beats_baseline for run in self.runs)
+
+
+def evaluate_repeated(
+    x: np.ndarray,
+    y: np.ndarray,
+    split_for: Callable[[int], Split],
+    repeats: int = DEFAULT_REPEATS,
+    model_for: Callable[[int], object] | None = None,
+    seed: int = 0,
+    on_run: Callable[[int, Scores], None] | None = None,
+) -> tuple[object, RepeatedScores]:
+    """Run the whole experiment `repeats` times with different randomness.
+
+    Each repeat re-draws the split *and* re-seeds the forest, so the range
+    that comes out covers both sources of luck. The returned model is the
+    one from the first repeat, so that saving a model stays deterministic.
+    """
+    if repeats < 1:
+        raise ValueError("repeats must be at least 1")
+
+    first_model, runs = None, []
+    for i in range(repeats):
+        model, scores = evaluate(x, y, split_for(seed + i), model_for, seed + i)
+        first_model = first_model if first_model is not None else model
+        runs.append(scores)
+        if on_run:
+            on_run(i, scores)
+    return first_model, RepeatedScores(runs[0].split, runs)

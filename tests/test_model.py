@@ -8,10 +8,18 @@ from satori.model import (
     Split,
     cluster_split,
     evaluate,
+    evaluate_repeated,
     features,
+    random_forest,
     random_split,
+    spread_of,
 )
 from satori.similarity import Cluster, cluster, fingerprint_of
+
+
+def small_forest(seed=0):
+    """A tiny forest, so tests stay fast."""
+    return random_forest(trees=20, seed=seed)
 
 EXAMPLE_CSV = Path(__file__).parent.parent / "examples" / "known_drugs.csv"
 
@@ -70,7 +78,7 @@ def test_a_model_learns_a_real_pattern(library):
     fps, values = library
     x = features(fps)
     split = random_split(len(fps), test_fraction=0.34, seed=1)
-    _, scores = evaluate(x, values, split, trees=30, seed=0)
+    _, scores = evaluate(x, values, split, model_for=small_forest, seed=0)
     assert scores.beats_baseline
     assert scores.n_train + scores.n_test == len(fps)
 
@@ -80,7 +88,7 @@ def test_a_model_cannot_learn_noise(library):
     fps, _ = library
     noise = np.random.default_rng(0).normal(size=len(fps))
     _, scores = evaluate(
-        features(fps), noise, random_split(len(fps), test_fraction=0.34, seed=1), trees=30
+        features(fps), noise, random_split(len(fps), test_fraction=0.34, seed=1), small_forest
     )
     assert scores.r2 < 0.5
 
@@ -92,8 +100,8 @@ def test_the_cluster_split_is_the_harder_test(library):
     clusters = cluster(fps, cutoff=0.5)
     assert len(clusters) >= 2, "the fixture must contain separable families"
 
-    _, optimistic = evaluate(x, values, random_split(len(fps), 0.34, seed=1), trees=30)
-    _, honest = evaluate(x, values, cluster_split(clusters, 0.34, seed=1), trees=30)
+    _, optimistic = evaluate(x, values, random_split(len(fps), 0.34, seed=1), model_for=small_forest)
+    _, honest = evaluate(x, values, cluster_split(clusters, 0.34, seed=1), model_for=small_forest)
     assert honest.mae >= optimistic.mae
 
 
@@ -107,7 +115,66 @@ def test_evaluate_rejects_an_empty_side(library):
     fps, values = library
     empty = Split("broken", list(range(len(fps))), [], "nothing held out")
     with pytest.raises(ValueError, match="left one side empty"):
-        evaluate(features(fps), values, empty, trees=5)
+        evaluate(features(fps), values, empty, model_for=small_forest)
+
+
+def test_spread_of_one_value_has_no_spread():
+    one = spread_of([0.5])
+    assert (one.mean, one.sd, one.low, one.high) == (0.5, 0.0, 0.5, 0.5)
+
+
+def test_spread_reports_the_range():
+    many = spread_of([0.4, 0.5, 0.6])
+    assert many.mean == 0.5
+    assert (many.low, many.high) == (0.4, 0.6)
+    assert many.sd > 0
+    assert str(many) == "0.500 +/- 0.100"
+
+
+def test_repeats_use_different_splits(library):
+    """Each repeat must re-draw the split, or the range would be meaningless."""
+    fps, values = library
+    _, scores = evaluate_repeated(
+        features(fps),
+        values,
+        lambda seed: random_split(len(fps), 0.34, seed),
+        repeats=4,
+        model_for=small_forest,
+    )
+    assert scores.repeats == 4
+    test_sets = {tuple(random_split(len(fps), 0.34, seed).test) for seed in range(4)}
+    assert len(test_sets) > 1
+
+
+def test_repeating_once_gives_the_same_answer_as_a_single_run(library):
+    fps, values = library
+    x = features(fps)
+    _, single = evaluate(x, values, random_split(len(fps), 0.34, seed=0), model_for=small_forest, seed=0)
+    _, repeated = evaluate_repeated(
+        x, values, lambda seed: random_split(len(fps), 0.34, seed), repeats=1, model_for=small_forest
+    )
+    assert repeated.r2.mean == single.r2
+    assert repeated.r2.sd == 0.0
+
+
+def test_beats_baseline_requires_every_repeat_to_beat_it(library):
+    """One lucky repeat must not be enough to claim the model works."""
+    fps, _ = library
+    noise = np.random.default_rng(0).normal(size=len(fps))
+    _, scores = evaluate_repeated(
+        features(fps),
+        noise,
+        lambda seed: random_split(len(fps), 0.34, seed),
+        repeats=4,
+        model_for=small_forest,
+    )
+    assert scores.beats_baseline == all(run.beats_baseline for run in scores.runs)
+
+
+def test_repeats_must_be_at_least_one(library):
+    fps, values = library
+    with pytest.raises(ValueError, match="at least 1"):
+        evaluate_repeated(features(fps), values, lambda seed: random_split(len(fps)), repeats=0)
 
 
 def test_train_command_reports_both_splits_and_saves(tmp_path, capsys):
@@ -130,16 +197,20 @@ def test_train_command_reports_both_splits_and_saves(tmp_path, capsys):
     rows += [f"arene{i},{s},8.0" for i, s in enumerate(AROMATICS)]
     library_csv.write_text("\n".join(rows) + "\n")
 
-    assert main(["train", str(library_csv), "--trees", "20", "--save", str(model)]) == 0
+    args = ["train", str(library_csv), "--trees", "20", "--repeats", "3"]
+    args += ["--test-fraction", "0.34", "--save", str(model)]
+    assert main(args) == 0
     out = capsys.readouterr().out
     assert "random split" in out and "cluster split" in out
+    assert "3 repeats" in out and "repeat 3:" in out
+    assert "+/-" in out  # every metric carries its spread
     assert "flatters this model by" in out
     assert model.exists()
 
-    # A saved model carries its honest scores and can predict.
+    # A saved model carries its honest scores, with their range, and predicts.
     assert main(["predict", str(model), "CCCCCCCCC"]) == 0
     out = capsys.readouterr().out
-    assert "on unseen chemical series it was out by" in out
+    assert "over 3 repeats on unseen chemical series it was out by" in out
     assert "predicted pchembl" in out
 
 
@@ -149,7 +220,10 @@ def test_predict_reports_a_bad_smiles_without_crashing(tmp_path, capsys):
         "name,smiles,pchembl\n" + "\n".join(f"m{i},{s},5.0" for i, s in enumerate(ALKANES)) + "\n"
     )
     model = tmp_path / "m.joblib"
-    main(["train", str(library_csv), "--trees", "10", "--save", str(model)])
+    main(
+        ["train", str(library_csv), "--trees", "10", "--repeats", "2"]
+        + ["--test-fraction", "0.5", "--save", str(model)]
+    )
     capsys.readouterr()
 
     assert main(["predict", str(model), "C1CC"]) == 1

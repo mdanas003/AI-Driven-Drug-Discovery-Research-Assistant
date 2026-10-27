@@ -19,10 +19,11 @@ Higher is more potent, and each +1 is ten times more potent.
 
 import csv
 import json
+import random
 import re
 import statistics
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -225,6 +226,35 @@ def aggregate(
     return rows
 
 
+def measurement_agreement(records: list[dict], seed: int = 0) -> dict | None:
+    """How well two independent measurements of the same molecule agree.
+
+    This is the resolution limit of the data. If two real measurements of
+    one compound differ by 0.8 log units, then no model can predict these
+    labels to better than roughly that error, however clever it is. Any
+    reported accuracy beyond this number is a sign of a leaked test set,
+    not of a better model. Returns None if nothing was measured twice.
+    """
+    groups: dict[tuple[str, str], list[float]] = defaultdict(list)
+    for record in records:
+        groups[(record["structure"], record["variant"])].append(float(record["pchembl_value"]))
+
+    repeated = [values for values in groups.values() if len(values) > 1]
+    if not repeated:
+        return None
+
+    # One random pair per molecule, so a heavily measured compound does
+    # not dominate the estimate.
+    rng = random.Random(seed)
+    differences = [abs(a - b) for values in repeated for a, b in [rng.sample(values, 2)]]
+    return {
+        "molecules_measured_twice": len(repeated),
+        "mean_difference": round(statistics.fmean(differences), 3),
+        "median_difference": round(statistics.median(differences), 3),
+        "share_over_1_log": round(sum(d > 1 for d in differences) / len(differences), 3),
+    }
+
+
 def write_csv(rows: list[dict], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -312,6 +342,7 @@ def build_dataset(
             "actives": sum(m["active"] for m in mutant),
             "variants": dict(Counter(m["variant"] for m in mutant).most_common()),
         },
+        "measurement_agreement": measurement_agreement(kept),
         "files": files,
     }
     meta_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")

@@ -233,28 +233,29 @@ The model is the easy half. Knowing whether its score means anything is the hard
 
 **Random split** holds out 20% of molecules. **Cluster split** holds out whole chemical series from Step 4, so nothing in the test set has a close relative in training.
 
+Every number below is the **average of 5 repeats** with its standard deviation. One split gives one number, and that number moves depending on which molecules happened to land in the test set; repeating the experiment is the only way to know how much it moves.
+
 | | Random split | Cluster split |
 |---|---:|---:|
-| R² (variation explained) | **0.698** | **0.594** |
-| MAE (average error, pChEMBL) | 0.524 | 0.651 |
-| Spearman (ranking quality) | 0.839 | 0.768 |
-| MAE from always guessing the average | 1.095 | 1.124 |
+| R² (variation explained) | 0.712 ± 0.018 | **0.588 ± 0.019** |
+| MAE (average error, pChEMBL) | 0.515 ± 0.013 | **0.654 ± 0.022** |
+| Spearman (ranking quality) | 0.846 ± 0.010 | **0.778 ± 0.013** |
+| MAE from always guessing the average | 1.120 ± 0.017 | 1.139 ± 0.027 |
 
-Both beat "always guess the average", so the model genuinely learned something. But the random split flatters it, and only the cluster number says anything about a series nobody has made yet — which is the only question a real project asks.
+Both beat "always guess the average", so the model genuinely learned something. The random split flatters it by 0.124 R² — **six times the run-to-run spread**, so that gap is real and not luck. Only the cluster number says anything about a series nobody has made yet, which is the only question a real project asks.
 
 ### There is no single honest number
 
 Here is the uncomfortable part. "Close relative" is a threshold we chose, and the score depends on it:
 
-| Clustering cut-off | Chemical series | Series held out | Cluster-split R² | MAE | Flattery from the random split |
-|---|---:|---:|---:|---:|---:|
-| 0.6 (same series) | 1,864 | 449 | 0.594 | 0.651 | 0.104 R² |
-| 0.4 (family resemblance) | 741 | 83 | 0.425 | 0.674 | 0.273 R² |
-| 0.3 (loosely related) | 471 | 93 | 0.458 | 0.697 | 0.240 R² |
+| Clustering cut-off | Series | Held out | Cluster-split R² | Flattery from the random split |
+|---|---:|---:|---:|---:|
+| 0.6 (same series) | 1,864 | 449 | 0.588 ± 0.019 | 0.124 R² |
+| 0.4 (family resemblance) | 741 | 83 | 0.413 ± 0.071 | 0.299 R² |
 
-Loosening the definition of "related" makes the test harder and the model look worse — R² falls from 0.59 to about 0.43. But notice the bottom row: R² goes slightly *up* while MAE gets *worse*. That is not a real improvement. With only 83–93 series held out, which ones land in the test set starts to dominate the result, so the measurement itself becomes noisy. Running it with a different `--seed` would move these numbers around.
+Loosening the definition of "related" makes the test harder and the model look worse, R² falling from 0.59 to 0.41. Look at the spread, though: it grows four-fold, because only 83 series are held out and which ones land in the test set starts to dominate. **The stricter test is the more honest one and the less reliable one at the same time**, and without repeats that would have been invisible.
 
-Two honest conclusions. There is **no single cut-off that makes one of these numbers *the* answer**, so a published R² with no stated split protocol tells you almost nothing. And a careful evaluation needs **repeats across seeds**, not one split — which this step does not yet do.
+So there is no cut-off that makes one of these *the* answer, which is why a published R² with no stated split protocol and no spread tells you almost nothing.
 
 ### What the numbers mean in practice
 
@@ -279,6 +280,57 @@ That first molecule is gefitinib, measured at 7.69, and the model says 7.66. **T
 - **Fingerprints cannot see activity cliffs.** The gefitinib/selenium pair from Step 4 are 0.82 similar and 1,200-fold apart in potency; this model will confidently predict they are alike.
 - **Every prediction carries the same error bar.** A random forest can report the spread across its trees, which would say when a molecule is far from anything it has seen. That belongs in a later step.
 - **It knows nothing about the protein.** It has learned which molecular fragments correlate with potency against wild-type EGFR, and would need retraining from scratch for any other target.
+
+## Step 5b: is 0.59 any good? A fair fight between models
+
+Before adding anything new, the obvious question: is a random forest the wrong model? Would gradient boosting, or a kernel method, or a graph neural network do better?
+
+```powershell
+.venv\Scripts\python -m satori benchmark data\chembl\CHEMBL203_IC50_wild_type.csv
+```
+
+Same clusters, same splits, same repeats, same metrics, one table. A model only wins if it wins by more than the run-to-run spread.
+
+| Model | Features | R² | MAE | Spearman | Top 10% | Time |
+|---|---|---:|---:|---:|---:|---:|
+| Gradient boosting | ECFP6 counts | 0.601 ± 0.035 | 0.642 | 0.785 | 0.46 | 11s |
+| Gradient boosting | ECFP4 counts + descriptors | 0.599 ± 0.030 | 0.643 | 0.785 | 0.47 | 10s |
+| Random forest | ECFP4 bits *(Step 5)* | 0.598 ± 0.017 | 0.650 | 0.781 | 0.46 | 120s |
+| Random forest | ECFP4 counts | 0.597 ± 0.016 | 0.650 | 0.781 | 0.44 | 126s |
+| Tanimoto SVR | ECFP4 bits | 0.597 ± 0.030 | **0.638** | 0.784 | **0.49** | 10s |
+| Gradient boosting | ECFP4 counts | 0.596 ± 0.034 | 0.643 | 0.781 | 0.45 | 12s |
+| Gradient boosting | 8 descriptors only | 0.291 ± 0.033 | 0.877 | 0.556 | 0.28 | 3s |
+| Ridge (a straight line) | ECFP4 counts | 0.181 ± 0.031 | 0.896 | 0.651 | 0.35 | 2s |
+
+### What this settles
+
+**The top six are a tie.** Three model families with completely different assumptions — bagged trees, boosted trees, a similarity kernel — all land at R² 0.60 ± 0.03, as does every representation we tried. When independent approaches converge on the same number, the ceiling is in the data, not the model. This is the evidence for expecting a graph neural network to tie as well: at 8,450 molecules on one target, architecture is not the bottleneck.
+
+**The two that lose, lose for informative reasons.** Ridge at 0.18 proves the task is genuinely non-linear, so fingerprints need a model that can combine bits. Descriptors-only at 0.29 proves structure matters: you get roughly half the R² from eight whole-molecule numbers, so "right size and greasiness" is a real part of the signal, but only a part.
+
+**The practical win is cost, not accuracy.** Gradient boosting reaches the same answer in 11 seconds that the forest takes 120 seconds to reach. `train --model gradient_boosting` is a tenfold saving for free.
+
+**The Tanimoto SVR quietly wins where it counts.** Statistically tied on R², but it has the best MAE (0.638) and the best top-10% hit rate (0.49). Comparing whole molecules the way a chemist does is a better fit for this task than treating 2,048 bits as independent features.
+
+### The ceiling, measured
+
+`fetch-chembl` now records how well the data agrees with itself, over the 2,075 molecules measured more than once:
+
+| | |
+|---|---|
+| Two measurements of the same molecule differ by | **0.775** log units on average |
+| Median difference | 0.59 |
+| Differ by more than 10-fold | 29% |
+
+**The best model's error (0.638) is smaller than the disagreement between two real lab measurements (0.775).** The model is already more self-consistent than the data it learned from. Absolute accuracy is finished on these labels, and any paper reporting MAE far below this on ChEMBL data has either leaked its test set or quietly filtered to easy compounds.
+
+### So where is the real headroom?
+
+Not in the model class. In three other places:
+
+1. **Ranking, which is not capped the same way.** Of the molecules the best model ranks in its top 10%, **49% are genuinely among the most potent** — five times better than picking at random. This is the number a user acts on, and Spearman 0.78 still has room.
+2. **Better labels.** Weighting or filtering by measurement count and spread raises the ceiling itself, rather than chasing it.
+3. **More data, not deeper models.** One target is where every architecture saturates. Multi-task learning across many kinases is where the next real gain lives, and where deep models finally start to earn their cost.
 
 ## Run it
 
@@ -331,8 +383,10 @@ Run the tests:
 - [`src/satori/library.py`](src/satori/library.py): load a CSV, screen, rank, save (Step 2).
 - [`src/satori/chembl.py`](src/satori/chembl.py): download, clean and aggregate ChEMBL activity data (Step 3).
 - [`src/satori/similarity.py`](src/satori/similarity.py): fingerprints, Tanimoto similarity, clustering (Step 4).
-- [`src/satori/model.py`](src/satori/model.py): features, the two splits, training and scoring (Step 5).
-- [`src/satori/__main__.py`](src/satori/__main__.py): the command line tool (`describe`, `screen`, `fetch-chembl`, `similar`, `cluster`, `train`, `predict`).
+- [`src/satori/model.py`](src/satori/model.py): the two splits, repeated training and scoring (Step 5).
+- [`src/satori/features.py`](src/satori/features.py): the molecular representations being compared (Step 5b).
+- [`src/satori/benchmark.py`](src/satori/benchmark.py): the model line-up and the fair-fight protocol (Step 5b).
+- [`src/satori/__main__.py`](src/satori/__main__.py): the command line tool (`describe`, `screen`, `fetch-chembl`, `similar`, `cluster`, `train`, `benchmark`, `predict`).
 - [`examples/known_drugs.csv`](examples/known_drugs.csv): 16 rows of known drugs, including one duplicate and one broken row on purpose.
 - [`tests/`](tests/): checks that the numbers and behaviour are right.
 
@@ -343,5 +397,7 @@ Run the tests:
 3. **Real data**: download known active compounds for one target (EGFR, a lung cancer target) from ChEMBL. *(done)*
 4. **Similarity search**: fingerprints, "find molecules similar to this drug", and clustering. *(done)*
 5. **First ML model**: predict activity from structure with scikit-learn, split by cluster so the score is honest. *(done)*
-6. **Targets**: which proteins matter for a disease (Open Targets).
-7. **Later**: web UI, API, docking and 3D structure, generative models, GPU, deployment. Each one is added only when the step before it works.
+5b. **Model bake-off**: prove the model class is not the bottleneck, and measure the data's own ceiling. *(done)*
+6. **More data, not deeper models**: multi-task learning across many kinase targets, where the measured headroom actually is.
+7. **Targets**: which proteins matter for a disease (Open Targets).
+8. **Later**: web UI, API, docking and 3D structure, generative models, GPU, deployment. Each one is added only when the step before it works.

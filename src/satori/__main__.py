@@ -10,6 +10,7 @@
 """
 
 import argparse
+import json
 import statistics
 import sys
 from pathlib import Path
@@ -17,15 +18,20 @@ from pathlib import Path
 import numpy as np
 import requests
 
+from satori import benchmark as bench
+from satori.features import featurize
+
 from satori.chembl import DEFAULT_ACTIVE_THRESHOLD, build_dataset
 from satori.library import load_csv, load_table, rank, save_csv, screen
 from satori.model import (
+    DEFAULT_REPEATS,
     DEFAULT_TEST_FRACTION,
     DEFAULT_TREES,
-    Scores,
+    RepeatedScores,
     cluster_split,
-    evaluate,
+    evaluate_repeated,
     features,
+    random_forest,
     random_split,
 )
 from satori.molecule import canonical_smiles, parse_smiles, strip_salts
@@ -289,16 +295,31 @@ def cmd_cluster(args: argparse.Namespace) -> int:
     return 0
 
 
-def print_scores(scores: Scores, explanation: str) -> None:
+def print_scores(scores: RepeatedScores, explanation: str) -> None:
+    first = scores.runs[0]
     print(f"\n  {scores.split} split  ({explanation})")
-    print(f"    trained on {scores.n_train:,}, tested on {scores.n_test:,}")
-    print(f"    R2 (variation explained)   {scores.r2:>7.3f}")
-    print(f"    MAE (average error)        {scores.mae:>7.3f}  pChEMBL units")
-    print(f"    RMSE                       {scores.rmse:>7.3f}")
-    print(f"    Spearman (ranking)         {scores.spearman:>7.3f}")
-    print(f"    always guess the average   {scores.baseline_mae:>7.3f}  MAE to beat")
+    print(
+        f"    {scores.repeats} repeats, each training on {first.n_train:,}"
+        f" and testing on {first.n_test:,}"
+    )
+    for label, metric in (
+        ("R2 (variation explained)", scores.r2),
+        ("MAE (average error)", scores.mae),
+        ("Spearman (ranking)", scores.spearman),
+        ("always guess the average", scores.baseline_mae),
+    ):
+        print(f"    {label:<26} {metric}   (lowest {metric.low}, highest {metric.high})")
     if not scores.beats_baseline:
-        print("    -> no better than guessing the average: this learned nothing useful")
+        print("    -> some repeats were no better than guessing the average")
+
+
+def scores_as_dict(scores: RepeatedScores) -> dict:
+    """A saved model's scores, flat enough to read without importing Satori."""
+    return {
+        "split": scores.split,
+        "repeats": scores.repeats,
+        **{name: vars(getattr(scores, name)) for name in ("r2", "mae", "spearman", "baseline_mae")},
+    }
 
 
 def cmd_train(args: argparse.Namespace) -> int:
@@ -312,28 +333,48 @@ def cmd_train(args: argparse.Namespace) -> int:
         return 1
 
     x = features(fps)
-    print(f"  learning {args.column} from {x.shape[1]:,} fingerprint bits")
+    print(f"  learning {args.column} from {x.shape[1]:,} fingerprint bits with {args.model}")
+    model_for = (
+        (lambda seed: random_forest(args.trees, seed))
+        if args.model == "random_forest"
+        else bench.MODELS[args.model]
+    )
 
     print(f"\nClustering at Tanimoto >= {args.cutoff} to build the honest split ...")
     clusters = cluster(fps, cutoff=args.cutoff)
     print(f"  {len(clusters):,} chemical series among {len(rows):,} molecules")
 
-    splits = [
-        random_split(len(rows), args.test_fraction, args.seed),
-        cluster_split(clusters, args.test_fraction, args.seed),
-    ]
+    split_makers = {
+        "random": lambda seed: random_split(len(rows), args.test_fraction, seed),
+        "cluster": lambda seed: cluster_split(clusters, args.test_fraction, seed),
+    }
     results = {}
-    for split in splits:
-        print(f"\nTraining {args.trees} trees for the {split.name} split ...")
-        forest, scores = evaluate(x, values, split, args.trees, args.seed)
-        results[split.name] = (forest, scores)
-        print_scores(scores, split.explanation)
+    for name, make_split in split_makers.items():
+        print(f"\nTraining {args.model} x {args.repeats} repeats, {name} split ...")
+        forest, scores = evaluate_repeated(
+            x,
+            values,
+            make_split,
+            repeats=args.repeats,
+            model_for=model_for,
+            seed=args.seed,
+            on_run=lambda i, s: print(f"  repeat {i + 1}: R2 {s.r2:.3f}, MAE {s.mae:.3f}"),
+        )
+        results[name] = (forest, scores)
+        print_scores(scores, make_split(args.seed).explanation)
 
     optimistic, honest = results["random"][1], results["cluster"][1]
-    print(
-        f"\nThe random split flatters this model by {optimistic.r2 - honest.r2:.3f} R2"
-        f" and {honest.mae - optimistic.mae:.3f} MAE."
-    )
+    gap = optimistic.r2.mean - honest.r2.mean
+    # A gap smaller than the spread of the measurements is not a finding.
+    noise = max(optimistic.r2.sd, honest.r2.sd)
+    print(f"\nThe random split flatters this model by {gap:.3f} R2 on average.")
+    if gap <= noise:
+        print(
+            f"That gap is within the run-to-run spread ({noise:.3f}),"
+            " so these two splits are not measurably different here."
+        )
+    else:
+        print(f"That is larger than the run-to-run spread ({noise:.3f}), so the gap is real.")
     print("Only the cluster number says anything about a series you have not made yet.")
 
     if args.save:
@@ -349,7 +390,12 @@ def cmd_train(args: argparse.Namespace) -> int:
                 "predicts": args.column,
                 "trained_on": str(args.csv),
                 "molecules": len(rows),
-                "scores": {"random": vars(optimistic), "cluster": vars(honest)},
+                "model": args.model,
+                "cluster_cutoff": args.cutoff,
+                "scores": {
+                    "random": scores_as_dict(optimistic),
+                    "cluster": scores_as_dict(honest),
+                },
             },
             path,
         )
@@ -367,11 +413,14 @@ def cmd_predict(args: argparse.Namespace) -> int:
         return 1
 
     honest = bundle["scores"]["cluster"]
+    mae, r2 = honest["mae"], honest["r2"]
     print(f"Model predicts {bundle['predicts']}, trained on {bundle['molecules']:,} molecules")
     print(
-        f"  on unseen chemical series it was out by {honest['mae']:.2f} on average"
-        f" (R2 {honest['r2']:.3f}) -- read every number below with that in mind"
+        f"  over {honest['repeats']} repeats on unseen chemical series it was out by"
+        f" {mae['mean']:.2f} +/- {mae['sd']:.2f} on average"
+        f" (R2 {r2['mean']:.3f} +/- {r2['sd']:.3f})"
     )
+    print("  read every number below with that in mind")
 
     ok = True
     for smiles in args.smiles:
@@ -382,8 +431,126 @@ def cmd_predict(args: argparse.Namespace) -> int:
             ok = False
             continue
         print(f"\n  {smiles}")
-        print(f"    predicted {bundle['predicts']} = {prediction:.2f} +/- {honest['mae']:.2f}")
+        print(f"    predicted {bundle['predicts']} = {prediction:.2f} +/- {mae['mean']:.2f}")
     return 0 if ok else 1
+
+
+def load_molecules(path: str, column: str) -> tuple[list, np.ndarray, list]:
+    """Read a library as RDKit molecules plus the values to learn."""
+    rows = load_table(path)
+    if rows and column not in rows[0]:
+        raise ValueError(f"{path}: no '{column}' column to learn from")
+
+    mols, values, skipped = [], [], []
+    for row in rows:
+        try:
+            mols.append(strip_salts(parse_smiles(row["smiles"])))
+            values.append(float(row[column]))
+        except ValueError:
+            skipped.append(row["name"])
+    if not mols:
+        raise ValueError(f"{path}: no readable molecules")
+    return mols, np.array(values), skipped
+
+
+def data_agreement(csv_path: str) -> dict | None:
+    """The resolution limit recorded by `fetch-chembl` beside this library."""
+    path = Path(csv_path)
+    for suffix in ("_wild_type", "_mutant", ""):
+        if suffix and not path.stem.endswith(suffix):
+            continue
+        sibling = path.with_name(path.stem.removesuffix(suffix) + ".json")
+        if sibling.exists():
+            try:
+                return json.loads(sibling.read_text(encoding="utf-8"))["measurement_agreement"]
+            except (KeyError, ValueError):
+                return None
+    return None
+
+
+def cmd_benchmark(args: argparse.Namespace) -> int:
+    try:
+        mols, values, skipped = load_molecules(args.csv, args.column)
+    except (OSError, ValueError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    print(f"Library: {len(mols):,} molecules from {args.csv}")
+    if skipped:
+        print(f"  skipped {len(skipped)} unusable row(s): {', '.join(skipped[:5])}")
+
+    contestants = bench.DEFAULT_CONTESTANTS
+    if args.only:
+        contestants = [(m, f) for m, f in contestants if m in args.only]
+        if not contestants:
+            print(f"error: no contestants named {args.only}", file=sys.stderr)
+            return 1
+
+    print(f"\nClustering at Tanimoto >= {args.cutoff} for the honest split ...")
+    fps = [fingerprint(mol) for mol in mols]
+    clusters = cluster(fps, cutoff=args.cutoff)
+    print(f"  {len(clusters):,} chemical series among {len(mols):,} molecules")
+
+    print("\nBuilding representations ...")
+    tables = {}
+    for name in sorted({feature for _, feature in contestants}):
+        tables[name] = featurize(name, mols)
+        print(f"  {name:<26} {tables[name].shape[1]:>5,} features")
+
+    results = bench.run(
+        tables,
+        values,
+        lambda seed: cluster_split(clusters, args.test_fraction, seed),
+        contestants=contestants,
+        repeats=args.repeats,
+        seed=args.seed,
+        on_start=lambda m, f: print(f"\nTraining {m} on {f}, {args.repeats} repeats ...", flush=True),
+        on_finish=lambda r: print(
+            f"  {'failed: ' + r.error if r.error else f'R2 {r.scores.r2}'}"
+            f"   [{r.seconds:.0f}s]"
+        ),
+    )
+
+    print(f"\n{'model':<18} {'features':<26} {'R2':>16} {'MAE':>16} {'Spearman':>8} {'top 10%':>8}")
+    for result in results.ranked:
+        s = result.scores
+        print(
+            f"{result.model:<18} {result.features:<26} {str(s.r2):>16} {str(s.mae):>16}"
+            f" {s.spearman.mean:>8.3f} {s.top_hit_rate.mean:>8.2f}"
+        )
+    for result in (r for r in results.results if r.error):
+        print(f"{result.model:<18} {result.features:<26} failed: {result.error}")
+
+    if not results.ranked:
+        print("\nerror: every contestant failed", file=sys.stderr)
+        return 1
+
+    best = results.ranked[0]
+    tied = [r for r in results.ranked[1:] if results.ties_with_best(r)]
+    print(f"\nBest honest R2: {best.model} on {best.features} ({best.scores.r2}).")
+    if tied:
+        names = ", ".join(f"{r.model} on {r.features}" for r in tied)
+        print(f"Tied with it, within the run-to-run spread: {names}.")
+        print("A difference smaller than the spread is not a result; prefer the simpler model.")
+    print(
+        f"Picking the model's top 10%, {best.scores.top_hit_rate.mean:.0%} are genuinely"
+        " among the most potent (picking at random would give 10%)."
+    )
+
+    agreement = data_agreement(args.csv)
+    if agreement:
+        limit = agreement["mean_difference"]
+        print(
+            f"\nThe data's own limit: two real measurements of the same molecule differ by"
+            f" {limit:.2f} on average."
+        )
+        if best.scores.mae.mean <= limit:
+            print(
+                f"The best model's error ({best.scores.mae.mean:.2f}) is already inside that."
+                " Absolute accuracy cannot improve further on these labels; better"
+                " ranking and better labels are where the headroom is."
+            )
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -442,10 +609,39 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"share of molecules held out (default: {DEFAULT_TEST_FRACTION})",
     )
     p.add_argument("--cutoff", type=float, default=DEFAULT_CUTOFF, help="clustering cut-off")
+    p.add_argument(
+        "--repeats",
+        type=int,
+        default=DEFAULT_REPEATS,
+        help=f"how many times to repeat each split (default: {DEFAULT_REPEATS})",
+    )
     p.add_argument("--trees", type=int, default=DEFAULT_TREES, help="trees in the forest")
+    p.add_argument(
+        "--model",
+        default="random_forest",
+        choices=sorted(bench.MODELS),
+        help="which model to fit (default: random_forest; see `benchmark` for a comparison)",
+    )
     p.add_argument("--seed", type=int, default=0, help="random seed, for repeatable splits")
     p.add_argument("--save", help="save the cluster-split model to this file")
     p.set_defaults(func=cmd_train)
+
+    p = sub.add_parser("benchmark", help="compare models and representations fairly")
+    p.add_argument("csv", help="library CSV with 'smiles' and a value column")
+    p.add_argument("--column", default="pchembl", help="what to predict (default: pchembl)")
+    p.add_argument("--cutoff", type=float, default=DEFAULT_CUTOFF, help="clustering cut-off")
+    p.add_argument(
+        "--test-fraction", type=float, default=DEFAULT_TEST_FRACTION, help="share held out"
+    )
+    p.add_argument("--repeats", type=int, default=3, help="repeats per contestant (default: 3)")
+    p.add_argument("--seed", type=int, default=0, help="random seed")
+    p.add_argument(
+        "--only",
+        nargs="+",
+        metavar="MODEL",
+        help=f"limit to these models: {', '.join(bench.MODELS)}",
+    )
+    p.set_defaults(func=cmd_benchmark)
 
     p = sub.add_parser("predict", help="predict with a saved model")
     p.add_argument("model", help="a model file written by `train --save`")
