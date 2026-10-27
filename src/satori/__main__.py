@@ -5,6 +5,8 @@
     python -m satori fetch-chembl CHEMBL203       # real data for one target
     python -m satori similar GEFITINIB lib.csv    # nearest neighbours
     python -m satori cluster lib.csv              # group into series
+    python -m satori train lib.csv                # predict potency, scored two ways
+    python -m satori predict model.joblib "<SMILES>"
 """
 
 import argparse
@@ -12,16 +14,27 @@ import statistics
 import sys
 from pathlib import Path
 
+import numpy as np
 import requests
 
 from satori.chembl import DEFAULT_ACTIVE_THRESHOLD, build_dataset
 from satori.library import load_csv, load_table, rank, save_csv, screen
+from satori.model import (
+    DEFAULT_TEST_FRACTION,
+    DEFAULT_TREES,
+    Scores,
+    cluster_split,
+    evaluate,
+    features,
+    random_split,
+)
 from satori.molecule import canonical_smiles, parse_smiles, strip_salts
 from satori.similarity import (
     DEFAULT_CUTOFF,
     cluster,
     fingerprint,
     fingerprint_library,
+    fingerprint_of,
     most_similar,
 )
 
@@ -276,6 +289,103 @@ def cmd_cluster(args: argparse.Namespace) -> int:
     return 0
 
 
+def print_scores(scores: Scores, explanation: str) -> None:
+    print(f"\n  {scores.split} split  ({explanation})")
+    print(f"    trained on {scores.n_train:,}, tested on {scores.n_test:,}")
+    print(f"    R2 (variation explained)   {scores.r2:>7.3f}")
+    print(f"    MAE (average error)        {scores.mae:>7.3f}  pChEMBL units")
+    print(f"    RMSE                       {scores.rmse:>7.3f}")
+    print(f"    Spearman (ranking)         {scores.spearman:>7.3f}")
+    print(f"    always guess the average   {scores.baseline_mae:>7.3f}  MAE to beat")
+    if not scores.beats_baseline:
+        print("    -> no better than guessing the average: this learned nothing useful")
+
+
+def cmd_train(args: argparse.Namespace) -> int:
+    try:
+        rows, fps, _ = load_library(args.csv)
+        if args.column not in (rows[0] if rows else {}):
+            raise ValueError(f"{args.csv}: no '{args.column}' column to learn from")
+        values = np.array([float(row[args.column]) for row in rows])
+    except (OSError, ValueError, KeyError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    x = features(fps)
+    print(f"  learning {args.column} from {x.shape[1]:,} fingerprint bits")
+
+    print(f"\nClustering at Tanimoto >= {args.cutoff} to build the honest split ...")
+    clusters = cluster(fps, cutoff=args.cutoff)
+    print(f"  {len(clusters):,} chemical series among {len(rows):,} molecules")
+
+    splits = [
+        random_split(len(rows), args.test_fraction, args.seed),
+        cluster_split(clusters, args.test_fraction, args.seed),
+    ]
+    results = {}
+    for split in splits:
+        print(f"\nTraining {args.trees} trees for the {split.name} split ...")
+        forest, scores = evaluate(x, values, split, args.trees, args.seed)
+        results[split.name] = (forest, scores)
+        print_scores(scores, split.explanation)
+
+    optimistic, honest = results["random"][1], results["cluster"][1]
+    print(
+        f"\nThe random split flatters this model by {optimistic.r2 - honest.r2:.3f} R2"
+        f" and {honest.mae - optimistic.mae:.3f} MAE."
+    )
+    print("Only the cluster number says anything about a series you have not made yet.")
+
+    if args.save:
+        import joblib
+
+        path = Path(args.save)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Keep the honest scores with the model, so it can never be quoted
+        # without them.
+        joblib.dump(
+            {
+                "forest": results["cluster"][0],
+                "predicts": args.column,
+                "trained_on": str(args.csv),
+                "molecules": len(rows),
+                "scores": {"random": vars(optimistic), "cluster": vars(honest)},
+            },
+            path,
+        )
+        print(f"\nSaved the cluster-split model to {path}")
+    return 0
+
+
+def cmd_predict(args: argparse.Namespace) -> int:
+    import joblib
+
+    try:
+        bundle = joblib.load(args.model)
+    except (OSError, KeyError) as err:
+        print(f"error: cannot read model {args.model}: {err}", file=sys.stderr)
+        return 1
+
+    honest = bundle["scores"]["cluster"]
+    print(f"Model predicts {bundle['predicts']}, trained on {bundle['molecules']:,} molecules")
+    print(
+        f"  on unseen chemical series it was out by {honest['mae']:.2f} on average"
+        f" (R2 {honest['r2']:.3f}) -- read every number below with that in mind"
+    )
+
+    ok = True
+    for smiles in args.smiles:
+        try:
+            prediction = bundle["forest"].predict(features([fingerprint_of(smiles)]))[0]
+        except ValueError as err:
+            print(f"\n  {smiles}\n    error: {err}")
+            ok = False
+            continue
+        print(f"\n  {smiles}")
+        print(f"    predicted {bundle['predicts']} = {prediction:.2f} +/- {honest['mae']:.2f}")
+    return 0 if ok else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="satori", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -321,6 +431,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--top", type=int, default=10, help="how many clusters to show (default: 10)")
     p.set_defaults(func=cmd_cluster)
+
+    p = sub.add_parser("train", help="predict potency from structure, scored two ways")
+    p.add_argument("csv", help="library CSV with 'smiles' and a value column")
+    p.add_argument("--column", default="pchembl", help="what to predict (default: pchembl)")
+    p.add_argument(
+        "--test-fraction",
+        type=float,
+        default=DEFAULT_TEST_FRACTION,
+        help=f"share of molecules held out (default: {DEFAULT_TEST_FRACTION})",
+    )
+    p.add_argument("--cutoff", type=float, default=DEFAULT_CUTOFF, help="clustering cut-off")
+    p.add_argument("--trees", type=int, default=DEFAULT_TREES, help="trees in the forest")
+    p.add_argument("--seed", type=int, default=0, help="random seed, for repeatable splits")
+    p.add_argument("--save", help="save the cluster-split model to this file")
+    p.set_defaults(func=cmd_train)
+
+    p = sub.add_parser("predict", help="predict with a saved model")
+    p.add_argument("model", help="a model file written by `train --save`")
+    p.add_argument("smiles", nargs="+", help="one or more SMILES strings")
+    p.set_defaults(func=cmd_predict)
     return parser
 
 

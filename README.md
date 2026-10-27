@@ -216,6 +216,70 @@ So the real diversity is roughly **1,900 chemical series**, not 8,450 molecules.
 
 Clustering uses **sphere exclusion**: walk the molecules in order, let each unclaimed one found a cluster, and give it every unclaimed molecule within the cutoff. Satori walks the most potent molecules first, so each cluster centre is a compound worth looking at. It only ever holds one row of comparisons in memory, which matters because a full distance matrix for 8,450 molecules would be 36 million numbers.
 
+## Step 5: the first model, and how to not fool yourself
+
+Now Satori makes a *prediction* rather than a measurement or a calculation. Given a molecule's fingerprint, predict its pChEMBL value.
+
+```powershell
+.venv\Scripts\python -m satori train data\chembl\CHEMBL203_IC50_wild_type.csv --save data\models\egfr_wt.joblib
+.venv\Scripts\python -m satori predict data\models\egfr_wt.joblib "<SMILES>"
+```
+
+The model is a **random forest**: hundreds of decision trees, each trained on a different random slice of the data, averaging their answers. It takes about 80 seconds on 8,450 molecules.
+
+The model is the easy half. Knowing whether its score means anything is the hard half, and that depends entirely on how the data is split.
+
+### The same model, measured two ways
+
+**Random split** holds out 20% of molecules. **Cluster split** holds out whole chemical series from Step 4, so nothing in the test set has a close relative in training.
+
+| | Random split | Cluster split |
+|---|---:|---:|
+| R² (variation explained) | **0.698** | **0.594** |
+| MAE (average error, pChEMBL) | 0.524 | 0.651 |
+| Spearman (ranking quality) | 0.839 | 0.768 |
+| MAE from always guessing the average | 1.095 | 1.124 |
+
+Both beat "always guess the average", so the model genuinely learned something. But the random split flatters it, and only the cluster number says anything about a series nobody has made yet — which is the only question a real project asks.
+
+### There is no single honest number
+
+Here is the uncomfortable part. "Close relative" is a threshold we chose, and the score depends on it:
+
+| Clustering cut-off | Chemical series | Series held out | Cluster-split R² | MAE | Flattery from the random split |
+|---|---:|---:|---:|---:|---:|
+| 0.6 (same series) | 1,864 | 449 | 0.594 | 0.651 | 0.104 R² |
+| 0.4 (family resemblance) | 741 | 83 | 0.425 | 0.674 | 0.273 R² |
+| 0.3 (loosely related) | 471 | 93 | 0.458 | 0.697 | 0.240 R² |
+
+Loosening the definition of "related" makes the test harder and the model look worse — R² falls from 0.59 to about 0.43. But notice the bottom row: R² goes slightly *up* while MAE gets *worse*. That is not a real improvement. With only 83–93 series held out, which ones land in the test set starts to dominate the result, so the measurement itself becomes noisy. Running it with a different `--seed` would move these numbers around.
+
+Two honest conclusions. There is **no single cut-off that makes one of these numbers *the* answer**, so a published R² with no stated split protocol tells you almost nothing. And a careful evaluation needs **repeats across seeds**, not one split — which this step does not yet do.
+
+### What the numbers mean in practice
+
+- **MAE 0.65** means the typical prediction is out by about **4.5-fold in potency**. Good enough to sort a list into "probably worth making" and "probably not". Useless for predicting that a compound will be exactly 10 nM.
+- **Spearman 0.77** says the *ranking* is better than the absolute values, which is lucky: ranking is what a project needs when choosing what to synthesize next.
+- A saved model stores its cluster-split scores, and `predict` prints them before every prediction, so a number from this model cannot be quoted without its error bar:
+
+```
+Model predicts pchembl, trained on 8,450 molecules
+  on unseen chemical series it was out by 0.65 on average (R2 0.594)
+
+  COc1cc2ncnc(Nc3ccc(F)c(Cl)c3)c2cc1OCCCN1CCOCC1   predicted 7.66 +/- 0.65
+  CC(=O)OC1=CC=CC=C1C(=O)O                         predicted 5.32 +/- 0.65
+```
+
+That first molecule is gefitinib, measured at 7.69, and the model says 7.66. **This proves nothing**: gefitinib is in the training data. Predicting a molecule you trained on is the oldest way to fool yourself, and it is why the table above exists. Aspirin, which should do nothing to EGFR, is predicted weak at 5.32, which is at least the right direction.
+
+### Everything still wrong with this model
+
+- **It inherits the publication bias of Step 3.** 72% of its training data is active, where a real screen is under 1% active. It has barely seen what a genuinely dead compound looks like.
+- **Its targets are medians of measurements that disagree** by 0.68 log units on average. Part of the remaining error is the data's, not the model's, and no model can beat the noise in its labels.
+- **Fingerprints cannot see activity cliffs.** The gefitinib/selenium pair from Step 4 are 0.82 similar and 1,200-fold apart in potency; this model will confidently predict they are alike.
+- **Every prediction carries the same error bar.** A random forest can report the spread across its trees, which would say when a molecule is far from anything it has seen. That belongs in a later step.
+- **It knows nothing about the protein.** It has learned which molecular fragments correlate with potency against wild-type EGFR, and would need retraining from scratch for any other target.
+
 ## Run it
 
 Requires Python 3.11 or newer.
@@ -267,7 +331,8 @@ Run the tests:
 - [`src/satori/library.py`](src/satori/library.py): load a CSV, screen, rank, save (Step 2).
 - [`src/satori/chembl.py`](src/satori/chembl.py): download, clean and aggregate ChEMBL activity data (Step 3).
 - [`src/satori/similarity.py`](src/satori/similarity.py): fingerprints, Tanimoto similarity, clustering (Step 4).
-- [`src/satori/__main__.py`](src/satori/__main__.py): the command line tool (`describe`, `screen`, `fetch-chembl`, `similar`, `cluster`).
+- [`src/satori/model.py`](src/satori/model.py): features, the two splits, training and scoring (Step 5).
+- [`src/satori/__main__.py`](src/satori/__main__.py): the command line tool (`describe`, `screen`, `fetch-chembl`, `similar`, `cluster`, `train`, `predict`).
 - [`examples/known_drugs.csv`](examples/known_drugs.csv): 16 rows of known drugs, including one duplicate and one broken row on purpose.
 - [`tests/`](tests/): checks that the numbers and behaviour are right.
 
@@ -277,6 +342,6 @@ Run the tests:
 2. **Many molecules**: load a CSV of compounds, filter and rank them, save the results. *(done)*
 3. **Real data**: download known active compounds for one target (EGFR, a lung cancer target) from ChEMBL. *(done)*
 4. **Similarity search**: fingerprints, "find molecules similar to this drug", and clustering. *(done)*
-5. **First ML model**: predict activity from structure with scikit-learn, split by cluster so the score is honest.
+5. **First ML model**: predict activity from structure with scikit-learn, split by cluster so the score is honest. *(done)*
 6. **Targets**: which proteins matter for a disease (Open Targets).
 7. **Later**: web UI, API, docking and 3D structure, generative models, GPU, deployment. Each one is added only when the step before it works.
