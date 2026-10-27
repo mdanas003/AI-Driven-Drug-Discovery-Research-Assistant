@@ -20,6 +20,15 @@ import requests
 
 from satori import benchmark as bench
 from satori.features import featurize
+from satori.labels import (
+    DEFAULT_MAX_SPREAD,
+    DEFAULT_MIN_MEASUREMENTS,
+    WEIGHT_SCHEMES,
+    confident_indices,
+    quality_of,
+    restrict,
+    weights,
+)
 
 from satori.chembl import DEFAULT_ACTIVE_THRESHOLD, build_dataset
 from satori.library import load_csv, load_table, rank, save_csv, screen
@@ -553,6 +562,126 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_labels(args: argparse.Namespace) -> int:
+    """Measure how much of the error is the data's rather than the model's."""
+    try:
+        rows = load_table(args.csv)
+        mols, values, skipped = load_molecules(args.csv, args.column)
+        if "n_measurements" not in (rows[0] if rows else {}):
+            raise ValueError(f"{args.csv}: no 'n_measurements' column to judge labels by")
+        rows = [row for row in rows if row["name"] not in set(skipped)]
+    except (OSError, ValueError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    qualities = [quality_of(row) for row in rows]
+    confident = confident_indices(rows, args.min_measurements, args.max_spread)
+    print(f"Library: {len(rows):,} molecules from {args.csv}")
+    print(f"  measured once only:      {sum(q.n_measurements == 1 for q in qualities):>7,}")
+    print(f"  measured more than once: {sum(q.n_measurements > 1 for q in qualities):>7,}")
+    print(
+        f"  confident (>= {args.min_measurements} measurements, spread <= {args.max_spread}):"
+        f" {len(confident):>7,}"
+    )
+    if len(confident) < 50:
+        print("error: too few confident labels to measure anything", file=sys.stderr)
+        return 1
+
+    x = featurize(args.features, mols)
+    fps = [fingerprint(mol) for mol in mols]
+    clusters = cluster(fps, cutoff=args.cutoff)
+    print(f"  {len(clusters):,} chemical series, clustered at {args.cutoff}")
+
+    confident_set = set(confident)
+    model_for = bench.MODELS[args.model]
+    everything = set(range(len(rows)))
+
+    def measure(name: str, train_allowed: set[int], test_allowed: set[int], weighting: str):
+        sample_weight = None if weighting == "equal" else weights(rows, weighting)
+        _, scores = evaluate_repeated(  # may raise ValueError on an empty side
+            x,
+            values,
+            lambda seed: restrict(
+                cluster_split(clusters, args.test_fraction, seed),
+                train_allowed=None if train_allowed == everything else train_allowed,
+                test_allowed=None if test_allowed == everything else test_allowed,
+            ),
+            repeats=args.repeats,
+            model_for=model_for,
+            seed=args.seed,
+            sample_weight=sample_weight,
+        )
+        print(
+            f"  {name:<34} R2 {str(scores.r2):>16}  MAE {str(scores.mae):>16}"
+            f"  top10% {scores.top_hit_rate.mean:.2f}"
+        )
+        return scores
+
+    print(f"\nUsing {args.model} on {args.features}, {args.repeats} repeats each.")
+
+    try:
+        print("\nExperiment 1: does a cleaner test set give a truer score?")
+        print("  (identical training; only what we score on changes)")
+        on_all = measure("scored on every label", everything, everything, "equal")
+        on_confident = measure(
+            "scored on confident labels only", everything, confident_set, "equal"
+        )
+
+        print("\nExperiment 2: does trusting better labels more help the model?")
+        print("  (identical confident test set; only the training changes)")
+        trials = {"all labels, unweighted": ("equal", everything)}
+        for scheme in args.schemes:
+            if scheme != "equal":
+                trials[f"all labels, weighted by {scheme}"] = (scheme, everything)
+        trials["confident labels only"] = ("equal", confident_set)
+
+        results = {
+            name: measure(name, train_allowed, confident_set, scheme)
+            for name, (scheme, train_allowed) in trials.items()
+        }
+    except ValueError as err:
+        print(f"\nerror: {err}", file=sys.stderr)
+        print("Try a smaller --test-fraction, or a tighter --cutoff.", file=sys.stderr)
+        return 1
+
+    difference = on_all.mae.mean - on_confident.mae.mean
+    noise = max(on_all.mae.sd, on_confident.mae.sd)
+
+    print("\nWhat this says:")
+    if difference > noise:
+        print(
+            f"  Scoring on confident labels cuts the error by {difference:.3f} MAE,"
+            f" more than the run-to-run spread ({noise:.3f})."
+        )
+        print(
+            f"  So roughly {difference:.2f} of the {on_all.mae.mean:.2f} error was the data's,"
+            f" not the model's. Against clean labels the model is out by"
+            f" {on_confident.mae.mean:.2f}."
+        )
+    else:
+        print(
+            f"  Scoring on confident labels changes the error by only {difference:+.3f} MAE,"
+            f" within the spread ({noise:.3f}): label noise is not what limits this model."
+        )
+
+    best = min(results.items(), key=lambda item: item[1].mae.mean)
+    baseline = results["all labels, unweighted"]
+    gain = baseline.mae.mean - best[1].mae.mean
+    weight_noise = max(baseline.mae.sd, best[1].mae.sd)
+    if gain > weight_noise:
+        print(f"  Best training strategy: {best[0]} ({gain:.3f} MAE better than unweighted).")
+    else:
+        print(
+            f"  No training strategy beat plain unweighted labels by more than the"
+            f" spread ({weight_noise:.3f}). Weighting is not worth the complexity here."
+        )
+    print(
+        f"  Only {len(confident):,} of {len(rows):,} molecules have a label we can check,"
+        " so the ceiling itself is measured on thin evidence."
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="satori", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -642,6 +771,40 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"limit to these models: {', '.join(bench.MODELS)}",
     )
     p.set_defaults(func=cmd_benchmark)
+
+    p = sub.add_parser("labels", help="measure how much of the error is the data's")
+    p.add_argument("csv", help="library CSV from fetch-chembl (needs n_measurements, spread)")
+    p.add_argument("--column", default="pchembl", help="what to predict (default: pchembl)")
+    p.add_argument("--features", default="ecfp4", help="representation (default: ecfp4)")
+    p.add_argument(
+        "--model", default="gradient_boosting", choices=sorted(bench.MODELS), help="which model"
+    )
+    p.add_argument(
+        "--min-measurements",
+        type=int,
+        default=DEFAULT_MIN_MEASUREMENTS,
+        help=f"measurements needed to trust a label (default: {DEFAULT_MIN_MEASUREMENTS})",
+    )
+    p.add_argument(
+        "--max-spread",
+        type=float,
+        default=DEFAULT_MAX_SPREAD,
+        help=f"widest disagreement still trusted (default: {DEFAULT_MAX_SPREAD})",
+    )
+    p.add_argument(
+        "--schemes",
+        nargs="+",
+        default=["count", "agreement", "both"],
+        choices=list(WEIGHT_SCHEMES),
+        help="weighting schemes to try",
+    )
+    p.add_argument("--cutoff", type=float, default=DEFAULT_CUTOFF, help="clustering cut-off")
+    p.add_argument(
+        "--test-fraction", type=float, default=0.3, help="share held out (default: 0.3)"
+    )
+    p.add_argument("--repeats", type=int, default=5, help="repeats per row (default: 5)")
+    p.add_argument("--seed", type=int, default=0, help="random seed")
+    p.set_defaults(func=cmd_labels)
 
     p = sub.add_parser("predict", help="predict with a saved model")
     p.add_argument("model", help="a model file written by `train --save`")

@@ -326,11 +326,51 @@ Same clusters, same splits, same repeats, same metrics, one table. A model only 
 
 ### So where is the real headroom?
 
-Not in the model class. In three other places:
+Not in the model class. Three candidates:
 
 1. **Ranking, which is not capped the same way.** Of the molecules the best model ranks in its top 10%, **49% are genuinely among the most potent** — five times better than picking at random. This is the number a user acts on, and Spearman 0.78 still has room.
-2. **Better labels.** Weighting or filtering by measurement count and spread raises the ceiling itself, rather than chasing it.
-3. **More data, not deeper models.** One target is where every architecture saturates. Multi-task learning across many kinases is where the next real gain lives, and where deep models finally start to earn their cost.
+2. **Better labels.** Weighting or filtering by measurement count and spread might raise the ceiling itself, rather than chasing it. Step 5c tests this.
+3. **More data, not deeper models.** One target is where every architecture saturates. Multi-task learning across many kinases is where the next real gain should live.
+
+## Step 5c: the label-quality hypothesis, and why it failed
+
+If labels disagree by 0.775 and the model is out by 0.64, the obvious move is to trust the better-measured molecules more. In our data, 85% of molecules were measured exactly once, and only 761 of 8,450 have two or more measurements agreeing within 1.0 log.
+
+```powershell
+.venv\Scripts\python -m satori labels data\chembl\CHEMBL203_IC50_wild_type.csv
+```
+
+Two experiments, kept deliberately apart, because mixing them is how a changed yardstick gets mistaken for a better model.
+
+**Experiment 1 — identical training, change only what we score on.** If the error is the data's fault, scoring against labels we can check should reduce it.
+
+| Scored on | R² | MAE | Top 10% |
+|---|---:|---:|---:|
+| every label | 0.566 ± 0.022 | 0.671 ± 0.010 | 0.43 |
+| confident labels only | 0.532 ± 0.154 | 0.684 ± 0.065 | 0.28 |
+
+**It did not.** The error moved by −0.013 MAE, well inside the ±0.065 spread. Label noise is not what limits this model.
+
+**Experiment 2 — identical confident test set, change only what the model sees.**
+
+| Trained on | R² | MAE | Top 10% |
+|---|---:|---:|---:|
+| all labels, unweighted | 0.532 ± 0.154 | 0.684 ± 0.065 | 0.28 |
+| all labels, weighted by count (√n) | 0.535 ± 0.160 | 0.679 ± 0.083 | 0.28 |
+| all labels, weighted by agreement | 0.534 ± 0.149 | 0.683 ± 0.071 | 0.27 |
+| all labels, weighted by both | 0.554 ± 0.142 | 0.672 ± 0.072 | 0.27 |
+| **confident labels only (761)** | **0.447 ± 0.117** | **0.759 ± 0.053** | 0.41 |
+
+No weighting scheme beat plain unweighted labels by more than the spread. And training on only the clean 9% was clearly **worse**: R² 0.447 against 0.532.
+
+### What we learned by being wrong
+
+- **8,450 noisy labels beat 761 clean ones.** Throwing away imperfect data to feel rigorous made the model worse. Quantity won.
+- **The binding constraint is coverage, not noise.** The model's error comes from being asked about chemical series it has never seen, not from wobble in the numbers it trained on. A median of several measurements already cancels much of the random error; what it cannot do is teach the model about unfamiliar chemistry.
+- **We cannot even measure the ceiling precisely.** Scoring on the confident subset leaves about 230 molecules, and the spread explodes from ±0.022 to ±0.154 R². Any claim about label noise on this data, ours included, rests on thin evidence. That is worth remembering whenever a paper quotes a noise floor.
+- **One number went the other way.** Training on confident labels only scored better on the top-10% hit rate (0.41 against 0.28). That is almost certainly because its training data and the test set are then drawn from the same narrow slice, not because it learned more. A single metric moving against the others is a prompt to be suspicious, not to celebrate.
+
+This cost an afternoon and killed a plausible idea before anything got built on top of it. The result also points the next step more firmly: if more data beats cleaner data, then **multi-task learning across many targets** is the thing to do, and that is now an evidence-backed decision rather than a hunch.
 
 ## Run it
 
@@ -386,7 +426,8 @@ Run the tests:
 - [`src/satori/model.py`](src/satori/model.py): the two splits, repeated training and scoring (Step 5).
 - [`src/satori/features.py`](src/satori/features.py): the molecular representations being compared (Step 5b).
 - [`src/satori/benchmark.py`](src/satori/benchmark.py): the model line-up and the fair-fight protocol (Step 5b).
-- [`src/satori/__main__.py`](src/satori/__main__.py): the command line tool (`describe`, `screen`, `fetch-chembl`, `similar`, `cluster`, `train`, `benchmark`, `predict`).
+- [`src/satori/labels.py`](src/satori/labels.py): label confidence, training weights, split restriction (Step 5c).
+- [`src/satori/__main__.py`](src/satori/__main__.py): the command line tool (`describe`, `screen`, `fetch-chembl`, `similar`, `cluster`, `train`, `benchmark`, `labels`, `predict`).
 - [`examples/known_drugs.csv`](examples/known_drugs.csv): 16 rows of known drugs, including one duplicate and one broken row on purpose.
 - [`tests/`](tests/): checks that the numbers and behaviour are right.
 
@@ -398,6 +439,7 @@ Run the tests:
 4. **Similarity search**: fingerprints, "find molecules similar to this drug", and clustering. *(done)*
 5. **First ML model**: predict activity from structure with scikit-learn, split by cluster so the score is honest. *(done)*
 5b. **Model bake-off**: prove the model class is not the bottleneck, and measure the data's own ceiling. *(done)*
-6. **More data, not deeper models**: multi-task learning across many kinase targets, where the measured headroom actually is.
+5c. **Label quality**: test whether trusting better-measured labels helps. It does not; quantity wins. *(done)*
+6. **More data, not deeper models**: multi-task learning across many kinase targets, now the evidence-backed next move.
 7. **Targets**: which proteins matter for a disease (Open Targets).
 8. **Later**: web UI, API, docking and 3D structure, generative models, GPU, deployment. Each one is added only when the step before it works.

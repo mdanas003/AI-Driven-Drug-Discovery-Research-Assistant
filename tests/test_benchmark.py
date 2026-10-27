@@ -89,15 +89,25 @@ def test_top_hit_rate_of_random_guessing_is_near_the_share():
     assert 0.02 < float(np.mean(rates)) < 0.2  # around 0.10
 
 
-def test_every_model_can_train_and_predict(mols):
+@pytest.mark.parametrize("name", list(bench.MODELS))
+def test_every_model_can_train_and_predict(name, mols):
     x = featurize("ecfp4", mols)
     y = np.array([5.0] * len(ALKANES) + [8.0] * len(AROMATICS))
-    for name, build in bench.MODELS.items():
-        model = build(0)
-        model.fit(x, y)
-        predictions = model.predict(x)
-        assert predictions.shape == y.shape, name
-        assert np.isfinite(predictions).all(), name
+    model = bench.MODELS[name](0)
+    model.fit(x, y)
+    predictions = model.predict(x)
+    assert predictions.shape == y.shape
+    assert np.isfinite(predictions).all()
+
+
+@pytest.mark.parametrize("name", list(bench.MODELS))
+def test_every_model_accepts_sample_weights(name, mols):
+    """The label-quality experiment weights molecules, so all models must."""
+    x = featurize("ecfp4", mols)
+    y = np.array([5.0] * len(ALKANES) + [8.0] * len(AROMATICS))
+    weights = np.linspace(0.5, 1.5, len(y))
+    predictions = bench.MODELS[name](0).fit(x, y, sample_weight=weights).predict(x)
+    assert np.isfinite(predictions).all()
 
 
 def test_run_measures_every_contestant_under_the_same_split(mols):

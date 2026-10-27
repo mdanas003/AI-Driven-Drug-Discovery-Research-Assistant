@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 import numpy as np
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.linear_model import Ridge
-from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVR
 
@@ -59,10 +58,12 @@ class TanimotoSVR(BaseEstimator, RegressorMixin):
         self.C = C
         self.epsilon = epsilon
 
-    def fit(self, x: np.ndarray, y: np.ndarray) -> "TanimotoSVR":
+    def fit(self, x: np.ndarray, y: np.ndarray, sample_weight=None) -> "TanimotoSVR":
         self.train_x_ = np.asarray(x, dtype=np.float32)
         self.svr_ = SVR(kernel="precomputed", C=self.C, epsilon=self.epsilon)
-        self.svr_.fit(tanimoto_kernel(self.train_x_, self.train_x_), y)
+        self.svr_.fit(
+            tanimoto_kernel(self.train_x_, self.train_x_), y, sample_weight=sample_weight
+        )
         return self
 
     def predict(self, x: np.ndarray) -> np.ndarray:
@@ -89,11 +90,34 @@ def gradient_boosting(seed: int = 0, trees: int = 600):
     )
 
 
-def ridge(seed: int = 0):
-    """A straight line through 2,048 dimensions. Here to keep everyone
-    honest: if this matches the clever models, the clever models are not
-    earning their complexity."""
-    return make_pipeline(StandardScaler(with_mean=False), Ridge(alpha=10.0))
+class ScaledRidge(BaseEstimator, RegressorMixin):
+    """A straight line through 2,048 dimensions, on scaled features.
+
+    Here to keep everyone honest: if this matches the clever models, the
+    clever models are not earning their complexity.
+
+    Written out rather than assembled as a Pipeline because a pipeline will
+    not pass sample weights through to its final step without scikit-learn's
+    metadata routing turned on, and every model here must accept weights so
+    that the label-quality experiment can treat them all alike.
+    """
+
+    def __init__(self, alpha: float = 10.0):
+        self.alpha = alpha
+
+    def fit(self, x: np.ndarray, y: np.ndarray, sample_weight=None) -> "ScaledRidge":
+        # with_mean=False keeps sparse fingerprint columns sparse.
+        self.scaler_ = StandardScaler(with_mean=False).fit(x)
+        self.ridge_ = Ridge(alpha=self.alpha)
+        self.ridge_.fit(self.scaler_.transform(x), y, sample_weight=sample_weight)
+        return self
+
+    def predict(self, x: np.ndarray) -> np.ndarray:
+        return self.ridge_.predict(self.scaler_.transform(x))
+
+
+def ridge(seed: int = 0) -> ScaledRidge:
+    return ScaledRidge()
 
 
 MODELS: dict[str, Callable[[int], object]] = {

@@ -153,17 +153,24 @@ def evaluate(
     split: Split,
     model_for: Callable[[int], object] | None = None,
     seed: int = 0,
+    sample_weight: np.ndarray | None = None,
 ) -> tuple[object, Scores]:
     """Train on the split's training half, score on its held-out half.
 
     `model_for` builds the model from a seed, so any scikit-learn style
     regressor can be measured under exactly the same protocol.
+    `sample_weight` lets better-measured molecules count for more; the
+    held-out half is always scored unweighted, since a score has to mean
+    the same thing however the model was trained.
     """
     if not split.train or not split.test:
         raise ValueError(f"The {split.name} split left one side empty.")
 
     model = (model_for or random_forest)(seed)
-    model.fit(x[split.train], y[split.train])
+    if sample_weight is None:
+        model.fit(x[split.train], y[split.train])
+    else:
+        model.fit(x[split.train], y[split.train], sample_weight=sample_weight[split.train])
     predicted = model.predict(x[split.test])
     actual = y[split.test]
 
@@ -261,6 +268,7 @@ def evaluate_repeated(
     model_for: Callable[[int], object] | None = None,
     seed: int = 0,
     on_run: Callable[[int, Scores], None] | None = None,
+    sample_weight: np.ndarray | None = None,
 ) -> tuple[object, RepeatedScores]:
     """Run the whole experiment `repeats` times with different randomness.
 
@@ -273,7 +281,9 @@ def evaluate_repeated(
 
     first_model, runs = None, []
     for i in range(repeats):
-        model, scores = evaluate(x, y, split_for(seed + i), model_for, seed + i)
+        model, scores = evaluate(
+            x, y, split_for(seed + i), model_for, seed + i, sample_weight=sample_weight
+        )
         first_model = first_model if first_model is not None else model
         runs.append(scores)
         if on_run:
