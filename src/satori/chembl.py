@@ -78,19 +78,32 @@ _MUTANT_WORD = re.compile(r"\bmutan|\bmutation", re.IGNORECASE)
 GetJson = Callable[[str, dict | None], dict]
 
 
-def get_json(url: str, params: dict | None = None, retries: int = 3) -> dict:
-    """GET a JSON document, retrying a few times on network or server errors."""
+def get_json(url: str, params: dict | None = None, retries: int = 5) -> dict:
+    """GET a JSON document, retrying on anything that a retry could fix.
+
+    Long runs meet failures that a short one never shows. Over a few
+    hundred requests this API has refused with read timeouts, reset
+    connections, and responses that stop mid-body — the last of which
+    arrives as ChunkedEncodingError, or as a JSON error when a truncated
+    body happens to parse as far as it goes. Catching only connection and
+    timeout errors leaves those to crash a job hours in, so everything
+    except an HTTP 4xx is retried; a 4xx means the request itself is wrong
+    and asking again will not help.
+    """
     for attempt in range(1, retries + 1):
         try:
-            response = requests.get(url, params=params, timeout=60)
+            response = requests.get(url, params=params, timeout=120)
             if response.status_code < 500:
                 response.raise_for_status()
                 return response.json()
             error: Exception = requests.HTTPError(f"HTTP {response.status_code} for {url}")
-        except (requests.ConnectionError, requests.Timeout) as err:
+        except requests.HTTPError:
+            raise
+        except (requests.RequestException, ValueError) as err:
             error = err
         if attempt < retries:
-            time.sleep(2**attempt)
+            # Back off further each time; a struggling server needs room.
+            time.sleep(min(2**attempt, 30))
     raise RuntimeError(f"ChEMBL request failed after {retries} attempts: {error}")
 
 

@@ -2,8 +2,12 @@
 
 import csv
 import json
+from types import SimpleNamespace
 
 import pytest
+import requests
+
+from satori import chembl
 
 from satori.chembl import (
     FIELDS,
@@ -51,6 +55,69 @@ class FakeChembl:
             "activities": self.records[offset:end],
             "page_meta": {"next": next_url, "total_count": len(self.records)},
         }
+
+
+class FlakyServer:
+    """Fails a given number of times, then answers."""
+
+    def __init__(self, failures, error):
+        self.failures, self.error, self.calls = failures, error, 0
+
+    def __call__(self, url, params=None, timeout=None):
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise self.error
+        return SimpleNamespace(
+            status_code=200, raise_for_status=lambda: None, json=lambda: {"ok": True}
+        )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        requests.ConnectionError("reset"),
+        requests.Timeout("read timed out"),
+        # A response that stops mid-body. This one used to crash a long run.
+        requests.exceptions.ChunkedEncodingError("connection broken"),
+        ValueError("truncated body is not valid JSON"),
+    ],
+)
+def test_get_json_retries_what_a_retry_can_fix(error, monkeypatch):
+    server = FlakyServer(failures=2, error=error)
+    monkeypatch.setattr(chembl.requests, "get", server)
+    monkeypatch.setattr(chembl.time, "sleep", lambda seconds: None)
+
+    assert chembl.get_json("http://example.test") == {"ok": True}
+    assert server.calls == 3
+
+
+def test_get_json_gives_up_with_a_clear_error(monkeypatch):
+    monkeypatch.setattr(
+        chembl.requests, "get", FlakyServer(failures=99, error=requests.Timeout("slow"))
+    )
+    monkeypatch.setattr(chembl.time, "sleep", lambda seconds: None)
+
+    with pytest.raises(RuntimeError, match="failed after 5 attempts"):
+        chembl.get_json("http://example.test")
+
+
+def test_get_json_does_not_retry_a_bad_request(monkeypatch):
+    """A 4xx means our request is wrong; asking again just wastes time."""
+
+    def bad_request(url, params=None, timeout=None):
+        bad_request.calls += 1
+        return SimpleNamespace(
+            status_code=404,
+            raise_for_status=lambda: (_ for _ in ()).throw(requests.HTTPError("404")),
+            json=dict,
+        )
+
+    bad_request.calls = 0
+    monkeypatch.setattr(chembl.requests, "get", bad_request)
+
+    with pytest.raises(requests.HTTPError):
+        chembl.get_json("http://example.test/nope")
+    assert bad_request.calls == 1
 
 
 def test_fetch_follows_every_page():
