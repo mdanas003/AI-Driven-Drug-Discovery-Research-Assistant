@@ -50,6 +50,7 @@ from satori.multitask import (
     arms_for,
     audit,
     build_pool,
+    honest_training_set,
     with_task_feature,
 )
 from satori.similarity import (
@@ -508,6 +509,45 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     clusters = cluster(fps, cutoff=args.cutoff)
     print(f"  {len(clusters):,} chemical series among {len(mols):,} molecules")
 
+    # Cached, so every contestant provably sees the same splits, and the
+    # strict filter is computed once per seed rather than once per model.
+    splits: dict[int, Split] = {}
+
+    def make_split(seed: int) -> Split:
+        if seed not in splits:
+            base = cluster_split(clusters, args.test_fraction, seed)
+            if not args.strict:
+                splits[seed] = base
+            else:
+                # Holding out whole clusters leaves near neighbours in
+                # training, since sphere exclusion only bounds distance to
+                # a cluster's centre. This drops them too.
+                train = honest_training_set(
+                    fps, base.test, args.cutoff, candidates=base.train
+                )
+                report = audit(fps, train, base.test, args.cutoff)
+                if not report.clean:
+                    raise ValueError(
+                        f"strict filter left {report.offenders} leaks"
+                        f" (worst {report.worst_similarity})"
+                    )
+                splits[seed] = Split(
+                    base.name,
+                    train,
+                    base.test,
+                    f"strict: nothing within {args.cutoff} of a test molecule",
+                )
+        return splits[seed]
+
+    if args.strict:
+        first = make_split(args.seed)
+        loose = cluster_split(clusters, args.test_fraction, args.seed)
+        dropped = len(loose.train) - len(first.train)
+        print(
+            f"  strict filter: {len(first.train):,} training rows, {dropped:,} fewer"
+            f" than holding out whole clusters alone ({dropped / len(loose.train):.0%})"
+        )
+
     print("\nBuilding representations ...")
     tables = {}
     for name in sorted({feature for _, feature in contestants}):
@@ -517,7 +557,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     results = bench.run(
         tables,
         values,
-        lambda seed: cluster_split(clusters, args.test_fraction, seed),
+        make_split,
         contestants=contestants,
         repeats=args.repeats,
         seed=args.seed,
@@ -873,6 +913,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--repeats", type=int, default=3, help="repeats per contestant (default: 3)")
     p.add_argument("--seed", type=int, default=0, help="random seed")
+    p.add_argument(
+        "--strict",
+        action="store_true",
+        help="also drop training molecules within the cut-off of any test molecule,"
+        " which holding out whole clusters alone does not do",
+    )
     p.add_argument(
         "--only",
         nargs="+",

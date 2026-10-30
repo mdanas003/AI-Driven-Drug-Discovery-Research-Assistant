@@ -291,26 +291,44 @@ Before adding anything new, the obvious question: is a random forest the wrong m
 
 Same clusters, same splits, same repeats, same metrics, one table. A model only wins if it wins by more than the run-to-run spread.
 
-| Model | Features | R² | MAE | Spearman | Top 10% | Time |
-|---|---|---:|---:|---:|---:|---:|
-| Gradient boosting | ECFP6 counts | 0.601 ± 0.035 | 0.642 | 0.785 | 0.46 | 11s |
-| Gradient boosting | ECFP4 counts + descriptors | 0.599 ± 0.030 | 0.643 | 0.785 | 0.47 | 10s |
-| Random forest | ECFP4 bits *(Step 5)* | 0.598 ± 0.017 | 0.650 | 0.781 | 0.46 | 120s |
-| Random forest | ECFP4 counts | 0.597 ± 0.016 | 0.650 | 0.781 | 0.44 | 126s |
-| Tanimoto SVR | ECFP4 bits | 0.597 ± 0.030 | **0.638** | 0.784 | **0.49** | 10s |
-| Gradient boosting | ECFP4 counts | 0.596 ± 0.034 | 0.643 | 0.781 | 0.45 | 12s |
-| Gradient boosting | 8 descriptors only | 0.291 ± 0.033 | 0.877 | 0.556 | 0.28 | 3s |
-| Ridge (a straight line) | ECFP4 counts | 0.181 ± 0.031 | 0.896 | 0.651 | 0.35 | 2s |
+Both protocols are shown, because Step 6.0 later proved that the choice changes the answer. **Clusters** holds out whole chemical series; **strict** additionally drops any training molecule within 0.6 of a test molecule, which clustering alone does not do (see Step 6.0). Strict trains on 39% fewer rows and describes genuinely novel chemistry.
+
+| Model | Features | R² (clusters) | R² (strict) | Top 10% strict | Time |
+|---|---|---:|---:|---:|---:|
+| Tanimoto SVR | ECFP4 bits | 0.597 ± 0.030 | **0.436 ± 0.024** | 0.30 | 10s |
+| Gradient boosting | ECFP4 counts | 0.596 ± 0.034 | 0.435 ± 0.025 | 0.29 | 12s |
+| Random forest | ECFP4 counts | 0.597 ± 0.016 | 0.434 ± 0.011 | 0.26 | 126s |
+| Gradient boosting | ECFP4 counts + descriptors | 0.599 ± 0.030 | 0.432 ± 0.019 | 0.28 | 10s |
+| Random forest | ECFP4 bits *(Step 5)* | 0.598 ± 0.017 | 0.427 ± 0.024 | 0.26 | 120s |
+| Gradient boosting | ECFP6 counts | **0.601 ± 0.035** | 0.402 ± 0.025 | 0.30 | 11s |
+| Gradient boosting | 8 descriptors only | 0.291 ± 0.033 | 0.104 ± 0.026 | 0.20 | 3s |
+| Ridge (a straight line) | ECFP4 counts | 0.181 ± 0.031 | **−0.893 ± 0.116** | 0.20 | 2s |
+
+### The loose protocol rewarded memorisation, and the table proves it
+
+Read the two R² columns as a pair. Everything drops when the near neighbours go, but **they do not all drop equally**, and the differences are the interesting part.
+
+**ECFP6 was the apparent winner and is now clearly out of the tie.** Nominally best under clusters (0.601), it falls to 0.402 — a gap of 0.034 below the strict winner, larger than the ±0.025 spread. ECFP6 means *larger* molecular fragments: more specific, more nearly a fingerprint of a whole scaffold. Larger fragments are excellent for recognising a scaffold already seen and poor for generalising to a new one. Under the loose protocol that memorisation looked like skill. **The gentler test did not merely inflate the scores; it changed which model won.**
+
+**Ridge collapsed past useless to −0.893.** A negative R² means worse than always guessing the average. A straight line through 2,048 sparse dimensions extrapolates confidently and wildly once nothing in training resembles the query, so it produces predictions far from any plausible value. Under the loose protocol a near neighbour always anchored it. This is the clearest demonstration in the project that out-of-domain behaviour is a property worth testing for, not a detail.
+
+**The Tanimoto SVR degrades most gracefully** and is now nominally first, as it already was on MAE and top-10% before. That fits what it does: it answers by similarity to training molecules, so when nothing is similar it falls back towards the average rather than extrapolating. Being well-behaved when it does not know is exactly the property a screening tool needs.
+
+**Descriptors-only drops to 0.104.** Eight whole-molecule numbers carry almost nothing about genuinely new chemistry. The weak "right size and greasiness" signal was mostly a within-familiar-chemistry trend.
+
+### What still holds
+
+**The top five remain one tie** (0.427–0.436, all within spread). Model choice is irrelevant across *two* difficulty regimes now, which is a stronger claim than the original bake-off could make: bagged trees, boosted trees and a similarity kernel converge whether the test is easy or hard. The ceiling is still not the model class.
+
+**Gradient boosting still matches the forest tenfold faster**, and the forest still has the narrowest spread (±0.011), making it the most stable if not the best.
 
 ### What this settles
 
-**The top six are a tie.** Three model families with completely different assumptions — bagged trees, boosted trees, a similarity kernel — all land at R² 0.60 ± 0.03, as does every representation we tried. When independent approaches converge on the same number, the ceiling is in the data, not the model. This is the evidence for expecting a graph neural network to tie as well: at 8,450 molecules on one target, architecture is not the bottleneck.
+**Model choice is not the bottleneck.** Three families with completely different assumptions converge under both protocols. At 8,450 molecules against one protein, architecture is not what limits us — which is the evidence for expecting a graph neural network to tie here too, rather than a prejudice against it.
 
-**The two that lose, lose for informative reasons.** Ridge at 0.18 proves the task is genuinely non-linear, so fingerprints need a model that can combine bits. Descriptors-only at 0.29 proves structure matters: you get roughly half the R² from eight whole-molecule numbers, so "right size and greasiness" is a real part of the signal, but only a part.
+**The losers lose informatively.** Ridge proves the task is genuinely non-linear, and spectacularly so out of domain. Descriptors-only proves structure matters: whole-molecule properties alone carry little, and almost nothing about unfamiliar chemistry.
 
-**The practical win is cost, not accuracy.** Gradient boosting reaches the same answer in 11 seconds that the forest takes 120 seconds to reach. `train --model gradient_boosting` is a tenfold saving for free.
-
-**The Tanimoto SVR quietly wins where it counts.** Statistically tied on R², but it has the best MAE (0.638) and the best top-10% hit rate (0.49). Comparing whole molecules the way a chemist does is a better fit for this task than treating 2,048 bits as independent features.
+**Representation matters less than protocol.** Counts versus bits, radius 2 versus 3: all within spread under the honest test, and the one representation that stood out did so by memorising.
 
 ### The ceiling, measured
 
@@ -322,13 +340,15 @@ Same clusters, same splits, same repeats, same metrics, one table. A model only 
 | Median difference | 0.59 |
 | Differ by more than 10-fold | 29% |
 
-**The best model's error (0.638) is smaller than the disagreement between two real lab measurements (0.775).** The model is already more self-consistent than the data it learned from. Absolute accuracy is finished on these labels, and any paper reporting MAE far below this on ChEMBL data has either leaked its test set or quietly filtered to easy compounds.
+**On familiar chemistry the best model's error (0.638) is smaller than the disagreement between two real lab measurements (0.775).** The model is already more self-consistent than the data it learned from, so absolute accuracy is finished on these labels: any paper reporting MAE far below this on ChEMBL data has either leaked its test set or quietly filtered to easy compounds.
+
+On genuinely novel chemistry the best MAE is 0.794, slightly *above* the data's own disagreement — the one regime where the labels are not yet the limiting factor, and where a better model could still help.
 
 ### So where is the real headroom?
 
 Not in the model class. Three candidates:
 
-1. **Ranking, which is not capped the same way.** Of the molecules the best model ranks in its top 10%, **49% are genuinely among the most potent** — five times better than picking at random. This is the number a user acts on, and Spearman 0.78 still has room.
+1. **Ranking, which is not capped the same way.** Of the molecules the best model ranks in its top 10%, **49% are genuinely among the most potent on familiar chemistry, and 30% on genuinely novel chemistry** — five times and three times better than picking at random. This is the number a user acts on, and it is the honest headline for the project: *three times better than chance at picking potent molecules from chemistry it has never seen.*
 2. **Better labels.** Weighting or filtering by measurement count and spread might raise the ceiling itself, rather than chasing it. Step 5c tests this.
 3. **More data, not deeper models.** One target is where every architecture saturates. Multi-task learning across many kinases is where the next real gain should live.
 

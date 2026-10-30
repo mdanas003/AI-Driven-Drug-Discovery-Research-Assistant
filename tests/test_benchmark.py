@@ -158,6 +158,20 @@ def test_benchmark_command(library_csv, capsys):
     assert "top 10%" in out
 
 
+def test_benchmark_strict_protocol_trains_on_less_and_says_so(library_csv, capsys):
+    """The strict filter must visibly remove the near misses clusters leave behind."""
+    shared = ["benchmark", str(library_csv), "--repeats", "1", "--test-fraction", "0.34"]
+    shared += ["--cutoff", "0.3", "--only", "ridge"]
+
+    assert main(shared) == 0
+    loose = capsys.readouterr().out
+    assert "strict filter" not in loose
+
+    assert main(shared + ["--strict"]) == 0
+    strict = capsys.readouterr().out
+    assert "fewer than holding out whole clusters alone" in strict
+
+
 def test_benchmark_command_rejects_a_missing_column(library_csv, capsys):
     assert main(["benchmark", str(library_csv), "--column", "nope"]) == 1
     assert "no 'nope' column" in capsys.readouterr().err
