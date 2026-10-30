@@ -37,13 +37,21 @@ from satori.model import (
     DEFAULT_TEST_FRACTION,
     DEFAULT_TREES,
     RepeatedScores,
+    Split,
     cluster_split,
+    evaluate,
     evaluate_repeated,
     features,
     random_forest,
     random_split,
 )
 from satori.molecule import canonical_smiles, parse_smiles, strip_salts
+from satori.multitask import (
+    arms_for,
+    audit,
+    build_pool,
+    with_task_feature,
+)
 from satori.similarity import (
     DEFAULT_CUTOFF,
     cluster,
@@ -682,6 +690,107 @@ def cmd_labels(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_multitask(args: argparse.Namespace) -> int:
+    """Does data from related proteins help predict the primary one?"""
+    try:
+        tables = {Path(args.csv).stem: load_table(args.csv)}
+        for extra in args.also or []:
+            tables[Path(extra).stem] = load_table(extra)
+        pool = build_pool(tables, args.primary, args.column)
+    except (OSError, ValueError, KeyError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    print(f"Pool: {len(pool):,} measurements across {len(pool.task_names)} proteins")
+    for name in pool.task_names[:8]:
+        marker = "  <- judged on this" if name == args.primary else ""
+        print(f"  {name:<24} {len(pool.indices_of(name)):>6,} rows{marker}")
+    if len(pool.task_names) > 8:
+        print(f"  ... and {len(pool.task_names) - 8} more proteins")
+
+    try:
+        mols = [strip_salts(parse_smiles(s)) for s in pool.smiles]
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    fps = [fingerprint(mol) for mol in mols]
+    x = with_task_feature(featurize(args.features, mols), pool)
+    print(f"  {x.shape[1]:,} features: {x.shape[1] - len(pool.task_names):,} structural"
+          f" + {len(pool.task_names)} saying which protein")
+
+    primary_rows = pool.indices_of(args.primary)
+    clusters = cluster([fps[i] for i in primary_rows], cutoff=args.cutoff)
+    print(f"\n{len(clusters):,} chemical series among the {len(primary_rows):,} primary molecules")
+
+    runs: dict[str, list] = {"single_task": [], "multi_task": []}
+    audits = []
+    for repeat in range(args.repeats):
+        seed = args.seed + repeat
+        series_split = cluster_split(clusters, args.test_fraction, seed)
+        # Cluster indices count primary molecules; the pool counts every row.
+        in_pool = Split(
+            "primary",
+            [primary_rows[i] for i in series_split.train],
+            [primary_rows[i] for i in series_split.test],
+            series_split.explanation,
+        )
+        single, multi = arms_for(pool, fps, in_pool, args.cutoff)
+
+        for arm in (single, multi):
+            report = audit(fps, arm.train, arm.test, args.cutoff)
+            audits.append((arm.name, report))
+            if not report.clean:
+                print(
+                    f"\nerror: {arm.name} leaked on repeat {repeat + 1}:"
+                    f" {report.offenders} training molecules within {args.cutoff}"
+                    f" of a test molecule (worst {report.worst_similarity})",
+                    file=sys.stderr,
+                )
+                return 1
+            _, scores = evaluate(x, pool.values, arm, bench.MODELS[args.model], seed)
+            runs[arm.name].append(scores)
+
+        print(
+            f"  repeat {repeat + 1}: single {len(single.train):,} rows ->"
+            f" R2 {runs['single_task'][-1].r2:.3f}   multi {len(multi.train):,} rows ->"
+            f" R2 {runs['multi_task'][-1].r2:.3f}"
+        )
+
+    worst = max(report.worst_similarity for _, report in audits)
+    print(
+        f"\nLeakage audit passed on all {len(audits)} training sets:"
+        f" closest any training molecule came to a test molecule was {worst}"
+        f" (limit {args.cutoff})."
+    )
+
+    single_scores = RepeatedScores("single_task", runs["single_task"])
+    multi_scores = RepeatedScores("multi_task", runs["multi_task"])
+    print(f"\n{'arm':<14} {'R2':>16} {'MAE':>16} {'Spearman':>9} {'top 10%':>8}")
+    for scores in (single_scores, multi_scores):
+        print(
+            f"{scores.split:<14} {str(scores.r2):>16} {str(scores.mae):>16}"
+            f" {scores.spearman.mean:>9.3f} {scores.top_hit_rate.mean:>8.2f}"
+        )
+
+    print()
+    for label, single_metric, multi_metric, higher_is_better in (
+        ("R2", single_scores.r2, multi_scores.r2, True),
+        ("MAE", single_scores.mae, multi_scores.mae, False),
+        ("top 10%", single_scores.top_hit_rate, multi_scores.top_hit_rate, True),
+    ):
+        gain = multi_metric.mean - single_metric.mean
+        if not higher_is_better:
+            gain = -gain
+        noise = max(single_metric.sd, multi_metric.sd)
+        verdict = "beyond the noise" if gain > noise else "inside the noise, so undecided"
+        print(f"  {label:<8} {gain:+.3f} for multi-task, spread {noise:.3f}  ->  {verdict}")
+    print(
+        "\nA gain smaller than the run-to-run spread is not evidence of anything."
+        " See docs/STEP6_PLAN.md for why this stage is expected to be underpowered."
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="satori", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -771,6 +880,23 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"limit to these models: {', '.join(bench.MODELS)}",
     )
     p.set_defaults(func=cmd_benchmark)
+
+    p = sub.add_parser("multitask", help="does data from related proteins help?")
+    p.add_argument("csv", help="the library holding the protein we are judged on")
+    p.add_argument("--also", nargs="+", help="further libraries to learn from")
+    p.add_argument("--primary", default="wild_type", help="task to judge on (default: wild_type)")
+    p.add_argument("--column", default="pchembl", help="what to predict (default: pchembl)")
+    p.add_argument("--features", default="ecfp4", help="representation (default: ecfp4)")
+    p.add_argument(
+        "--model", default="gradient_boosting", choices=sorted(bench.MODELS), help="which model"
+    )
+    p.add_argument("--cutoff", type=float, default=DEFAULT_CUTOFF, help="similarity cut-off")
+    p.add_argument(
+        "--test-fraction", type=float, default=DEFAULT_TEST_FRACTION, help="share held out"
+    )
+    p.add_argument("--repeats", type=int, default=5, help="repeats (default: 5)")
+    p.add_argument("--seed", type=int, default=0, help="random seed")
+    p.set_defaults(func=cmd_multitask)
 
     p = sub.add_parser("labels", help="measure how much of the error is the data's")
     p.add_argument("csv", help="library CSV from fetch-chembl (needs n_measurements, spread)")

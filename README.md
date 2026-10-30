@@ -372,6 +372,65 @@ No weighting scheme beat plain unweighted labels by more than the spread. And tr
 
 This cost an afternoon and killed a plausible idea before anything got built on top of it. The result also points the next step more firmly: if more data beats cleaner data, then **multi-task learning across many targets** is the thing to do, and that is now an evidence-backed decision rather than a hunch.
 
+## Step 6.0: learning from several proteins, and a correction to Step 5
+
+### The biology, briefly
+
+A drug works by sticking to a protein and stopping it working. EGFR is one of about 500 human **kinases** — molecular switches that tag other proteins with a phosphate group, using ATP (the cell's fuel) as the source. In cancer a mutated kinase gets stuck "on" and keeps telling the cell to divide.
+
+Every kinase has the same basic pocket, the place ATP normally binds. So a molecule shaped to plug one kinase's pocket often partly plugs another's. **A measurement against a different kinase is therefore a weak clue about EGFR**, not noise. That is the biological claim this step tests.
+
+### The computer science
+
+This is **transfer learning**: train on related tasks so the model sees more of the input space. Each row becomes "this molecule, against this protein", and the protein is encoded as 14 extra columns where exactly one is set — a **one-hot** encoding. One model then serves all 14 proteins while still being able to say "potent against wild-type EGFR, weak against T790M".
+
+```powershell
+.venv\Scripts\python -m satori multitask data\chembl\CHEMBL203_IC50_wild_type.csv --also data\chembl\CHEMBL203_IC50_mutant.csv
+```
+
+### The leak that had to be closed first
+
+Pooling proteins creates a way to cheat that single-task work does not have:
+
+> Gefitinib is in the EGFR test set. Gefitinib's measurement against the T790M mutant is in the training set. The model has seen the answer.
+
+**42% of the mutant rows are molecules that also appear in the wild-type set**, so this is what the obvious implementation does by default. Every training row within 0.6 Tanimoto of *any* test molecule is therefore removed, across all proteins, and the finished split is then **audited**: if anything slipped through, the command refuses to print scores. The test suite includes a deliberately leaky split to prove the audit fails when it should, because a guard never seen to fail cannot be trusted when it passes.
+
+### Result: no effect, and we said in advance that we would not be able to tell
+
+| Arm | Training rows | R² | MAE | Spearman | Top 10% |
+|---|---:|---:|---:|---:|---:|
+| Single protein | 4,103 | 0.428 ± 0.031 | 0.802 ± 0.025 | 0.666 | 0.30 |
+| 14 proteins | 6,947 | 0.426 ± 0.030 | 0.810 ± 0.026 | 0.662 | 0.31 |
+
+Every difference is **inside the run-to-run spread**: −0.002 R² against a spread of 0.031. The verdict is **undecided, not refuted** — [the plan](docs/STEP6_PLAN.md) predicted this stage would be underpowered, so a null result here carries no information about the hypothesis. Three explanations remain live and this experiment cannot separate them: too little extra data, mutants of one protein being too similar to add much, or the one-hot encoding being unable to express that wild-type EGFR resembles its own mutants more than a distant kinase.
+
+### The finding that actually matters: Step 5 was leaking
+
+Single-task R² here is **0.428**. Step 5 reported **0.588** for the same model on the same molecules. The difference is the filter:
+
+| Protocol | Training rows | What it guarantees |
+|---|---:|---|
+| Step 5: hold out whole clusters | 6,760 | test molecules' *cluster-mates* are absent |
+| Step 6.0: also drop near misses | 4,103 | nothing within 0.6 of a test molecule survives, anywhere |
+
+**The strict filter removes a further 2,657 rows — 39% of the training set.** Those molecules sat in a *different* cluster yet were still within 0.6 similarity of a test molecule.
+
+This is a property of sphere-exclusion clustering that is easy to miss: it guarantees members are close to their cluster **centre**, and says nothing about molecules in neighbouring clusters. Two molecules 0.59 similar can sit in different clusters, so "hold out whole clusters" does not mean "hold out everything similar".
+
+Two causes are mixed in that 0.588 → 0.428 drop, and this run cannot separate them: the harder test removes leakage (more honest), and the smaller training set weakens the model (an artifact of the method). Both push the same way.
+
+So the right conclusion is not "0.588 was a lie" but something Step 5 already warned about, now shown sharply:
+
+**The score depends on how novel the test chemistry is, and we now have two points on that curve.**
+
+| Question being asked | Protocol | R² |
+|---|---|---:|
+| A new series, but relatives may exist in our files | whole clusters held out | 0.59 |
+| Genuinely novel chemistry, nothing close in training | strict 0.6 filter | 0.43 |
+
+Both are real. The first describes the common case of exploring around a known scaffold; the second describes scaffold-hopping into new territory. A single quoted R² without its protocol is close to meaningless, which is why Satori prints the protocol every time.
+
 ## Run it
 
 Requires Python 3.11 or newer.
@@ -427,7 +486,8 @@ Run the tests:
 - [`src/satori/features.py`](src/satori/features.py): the molecular representations being compared (Step 5b).
 - [`src/satori/benchmark.py`](src/satori/benchmark.py): the model line-up and the fair-fight protocol (Step 5b).
 - [`src/satori/labels.py`](src/satori/labels.py): label confidence, training weights, split restriction (Step 5c).
-- [`src/satori/__main__.py`](src/satori/__main__.py): the command line tool (`describe`, `screen`, `fetch-chembl`, `similar`, `cluster`, `train`, `benchmark`, `labels`, `predict`).
+- [`src/satori/multitask.py`](src/satori/multitask.py): pooling proteins, the leakage filter and its audit (Step 6.0).
+- [`src/satori/__main__.py`](src/satori/__main__.py): the command line tool (`describe`, `screen`, `fetch-chembl`, `similar`, `cluster`, `train`, `benchmark`, `labels`, `multitask`, `predict`).
 - [`examples/known_drugs.csv`](examples/known_drugs.csv): 16 rows of known drugs, including one duplicate and one broken row on purpose.
 - [`tests/`](tests/): checks that the numbers and behaviour are right.
 
@@ -440,6 +500,7 @@ Run the tests:
 5. **First ML model**: predict activity from structure with scikit-learn, split by cluster so the score is honest. *(done)*
 5b. **Model bake-off**: prove the model class is not the bottleneck, and measure the data's own ceiling. *(done)*
 5c. **Label quality**: test whether trusting better-measured labels helps. It does not; quantity wins. *(done)*
-6. **More data, not deeper models**: multi-task learning across many kinase targets, now the evidence-backed next move.
+6.0. **Multi-task plumbing**: pool EGFR's mutants, with a leakage filter and audit. No effect, as predicted — and it exposed that Step 5's split was leaking. *(done)*
+6.1. **Multi-task at scale**: the whole kinome from ChEMBL's bulk release, where the data is large enough to settle the question. See [the plan](docs/STEP6_PLAN.md).
 7. **Targets**: which proteins matter for a disease (Open Targets).
 8. **Later**: web UI, API, docking and 3D structure, generative models, GPU, deployment. Each one is added only when the step before it works.
