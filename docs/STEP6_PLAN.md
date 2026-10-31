@@ -157,3 +157,130 @@ Worth writing down now, so it is not rationalised later:
 - **The test set stays small.** 1,690 molecules in about 450 series, and the Step 5 spread of ±0.02 R² is the floor for detecting any gain. A real but small improvement may be undetectable at this size, and we should say so rather than chase it with more seeds.
 - **More data may dilute rather than help.** If EGFR's 8,450 rows become 1% of the training set, the model may fit the average kinase and do worse on EGFR. Per-target weighting is the obvious response, and would need the same honest treatment Step 5c gave label weighting.
 - **The 6 GB download may not be worth it.** Stage 6.0 runs on data already here. If it shows no hint of transfer — remembering that it is underpowered and cannot refute the hypothesis by itself — then it is worth pausing to reconsider before spending the download and the disk. The cheapest stage comes first precisely so this decision can be made on evidence.
+
+---
+
+## 9. Stage 6.1 log: what the plan got wrong
+
+Written as it happened, because a plan that is quietly corrected is no longer a pre-registration.
+
+### Disk: the 45 GB in §5 was stale
+
+By the time the stage started, C: had **27 GB free**, not 45 — against the ~35 GB this needs. The download would have failed partway, and in the worst case filled the system drive.
+
+Two things fixed it. D: has **94 GB free**, so the release lives at `D:\chembl_dump\` and not on C: at all. That also avoids a trap nobody had noticed: the project folder is inside OneDrive, so extracting a 30 GB database anywhere under it would have handed OneDrive 30 GB to sync.
+
+**Lesson worth keeping:** §5 said "disk must be checked first" and the number in it was still four days old. A figure in a plan is a measurement with a date on it, not a constant.
+
+### The UniProt mapping route was unnecessary
+
+§5.1 planned to take UniProt's 491 reviewed human kinases and map them to ChEMBL targets by accession — two web services and a join, and the step whose cost justified the whole download.
+
+The dump makes it free. ChEMBL ships its own protein family tree in `protein_classification`, reachable from a target through `target_components` and `component_class`. So:
+
+| | Planned | Actual |
+|---|---|---|
+| Define the kinome | UniProt query, 491 kinases, map by accession | `WHERE pc.l3 = 'Protein Kinase'` |
+| Define Setting B | separate tyrosine-kinase list | `WHERE pc.l4 = 'TK protein kinase group'` |
+| Web requests | ~25 batched, plus failures | **zero** |
+
+This is better than cheaper. The family assignment now comes from the same release as the measurements, so "which kinases" and "which data" cannot drift apart between runs, and the shortlist is reproducible from the release name alone.
+
+### Download throughput, measured
+
+One connection to EBI runs at **about 290 KB/s** — 80 MB in the first five minutes, which puts the 5.76 GB file at roughly **six hours**. A second connection to a different byte range ran at the same speed rather than splitting the first one's bandwidth, and the server advertises `Accept-Ranges: bytes`.
+
+So the download is **six parallel ranged parts**, concatenated and then checked against ChEMBL's published SHA256 (`33c2037...c290d281`). Six, not sixteen, because this is a free public server. The checksum is what makes the trick safe to use: a misordered or short reassembly cannot match it, so the result is either verified or discarded. Expected time is **about 40 minutes**.
+
+### What is not a correction
+
+The §3 leakage procedure, the §4 staged settings and the §6 model order are unchanged. The result and its success criterion were fixed before any of this data existed, and nothing here touches them.
+
+### Code written for this stage
+
+- `src/satori/kinome.py` — read-only connection, the kinome and group queries, per-target extraction, and the shortlist floor.
+- `tests/test_kinome.py` — a miniature ChEMBL with the real table and column names, so the SQL is tested without the 5.76 GB file. Includes a non-kinase (thrombin) that must never appear in a kinase query, and a check that the rows feed Step 3's `clean`/`aggregate` unchanged.
+- `satori kinome-counts` and `satori kinome-extract`.
+
+**The deliberate non-feature:** `activities_for` does no filtering. It emits the same sixteen columns under the same names the web API returns, and every judgement about what to keep stays in Step 3's `drop_reason`. Two code paths that each decide what counts as a trustworthy measurement will eventually disagree, and then a difference between Step 5's score and Step 6's would be our own two implementations arguing rather than a finding.
+
+### The schema check earned its keep in the first minute
+
+`protein_classification` has **no `l1..l8` columns**. The §9 table above, written before the file finished downloading, says `WHERE pc.l3 = 'Protein Kinase'`, and that query cannot run.
+
+The real table is a parent/child tree with a `class_level` and, usefully, a denormalised full path on every node:
+
+```
+protein_class_id  parent_id  pref_name                  protein_class_desc
+            1100          6  Protein Kinase             enzyme  kinase  protein kinase
+            1285       1100  TK protein kinase group    enzyme  kinase  protein kinase  tk
+             130       1285  Tyrosine protein kinase...  enzyme  kinase  protein kinase  tk  abl
+```
+
+So the kinome is a path-prefix match rather than a column comparison, and the group name comes from a self-join back up to the level-4 ancestor. The *names* in the plan were right — `Protein Kinase` and `TK protein kinase group` both exist — only the access route was invented.
+
+**The part worth learning from.** Fifteen tests passed against a miniature ChEMBL before the real file arrived, and the miniature had `l1..l4` columns *because that is what the code assumed*. A fixture built from the same mistaken belief as the code under test confirms the belief rather than testing it, and it does so with a green tick. Hand-built fixtures can only check internal consistency; only the real artefact can check the assumption. Hence the four `@needs_release` tests, which skip without the dump and are the ones that caught this.
+
+The level-4 self-join is a `LEFT JOIN` on purpose: one target is classified as a protein kinase with no group beneath it, and it should count as a kinase rather than disappear from the kinome because a display label is missing.
+
+## 10. Stage 6.1 result: the data exists, and there is a lot of it
+
+One query, **26 seconds**, against two API attempts that failed over thirteen hours.
+
+| | |
+|---|---|
+| Human single-protein kinases with usable IC50 data | **405** |
+| Of those, tyrosine kinases (EGFR's own group) | 79 |
+| Total molecule-rows available | **266,265** |
+| EGFR alone, for comparison | 8,450 wild-type |
+
+The nine Manning kinase groups are all represented, so Setting C genuinely spans the family rather than leaning on one branch.
+
+### The data is extremely concentrated
+
+| Floor on molecules | Setting C targets | molecules | Setting B targets | molecules |
+|---:|---:|---:|---:|---:|
+| none | 405 | 266,265 | 79 | 128,260 |
+| 100 | **201** | **261,348** | **56** | **127,476** |
+| 500 | 109 | 239,712 | 39 | 122,748 |
+| 2,000 | 41 | 167,729 | 22 | 102,680 |
+
+The top 10 targets hold 28% of all rows, the top 50 hold 69%, and the top 109 hold 90%.
+
+### The floor: 100 molecules
+
+Chosen because it is nearly free. It keeps **98.1%** of all available rows; the 204 targets below it contribute 1.9% between them while each adding a file, a one-hot column and a slice of similarity-filter time. Above 100 the floor starts costing real data — 500 gives up 10% — and below it buys almost nothing.
+
+This is a judgement, so it is written down rather than left to whatever the data happened to contain. It is also not load-bearing: the concentration table shows every floor from 100 to 500 holds 90%+ of the rows, so the result should not depend on which one we picked. If it does, that is itself a finding.
+
+### What Stage 6.1 settles about §4
+
+Setting A was underpowered at **+2,844 rows (+42%)** against a ±0.02 R² detection floor, exactly as pre-registered, and it duly showed nothing. The scale has changed:
+
+| Setting | Extra training rows | Multiple of EGFR's own data |
+|---|---:|---:|
+| A. Mutants (done, null) | 2,844 | 1.4× |
+| **B. Tyrosine kinases** | ~119,000 | **15×** |
+| **C. Whole kinome** | ~253,000 | **31×** |
+
+Settings B and C are not underpowered. If pooling related-protein data helps at all, 15× and 31× is where it becomes visible — and if it still shows nothing at 31×, that is a real negative result about transfer in this data rather than a failure to measure.
+
+### Reproducibility note
+
+The derived CSVs are gitignored, like all of `data/`, so the repository ships the *queries* and not 266,265 rows of ChEMBL. `satori kinome-counts` and `satori kinome-extract --all-kinases --minimum 100` regenerate them from the named release, and the release is pinned by name and by the published SHA256 of its archive.
+
+### Extracted, and reconciled against the API
+
+| | targets | rows | distinct molecules |
+|---|---:|---:|---:|
+| EGFR alone (Step 5's training data) | 1 | 8,450 | 8,450 |
+| Setting B: tyrosine kinases | 56 | 132,940 | 81,297 |
+| Setting C: whole kinome | 201 | 268,677 | 177,410 |
+
+201 files at a floor of 100 molecules, splitting into **514 distinct (protein, variant) tasks**, 247 with 50 rows or more.
+
+**Rows are not chemistry.** A row is one (molecule, protein) pair, so a promiscuous inhibitor tested against twelve kinases contributes twelve rows and one structure. Against the hypothesis actually under test — that 8,450 molecules is too thin a sample of chemical space — the honest multiplier is the distinct-molecule one: Setting C adds **167,069 molecules EGFR has never seen, 21x** Step 5's variety, where the row count would have claimed 32x. §4's table said "~253,000 extra rows", which was true and the wrong unit.
+
+**The extraction reconciles exactly with Step 3.** EGFR's wild-type set from the dump is 8,450 molecules, and the overlap with the file Step 3 downloaded from the live API is **100.00%, with zero molecules on either side that the other lacks.** Two entirely separate routes — a paginated REST API in 2026-10 and a SQL reconstruction over six joins against the 2026-05 release — returning identical sets. That is the check that licenses comparing Step 6's scores against Step 5's at all.
+
+A smaller reconciliation worth recording, because it looked like a bug: the counts query reported 266,265 and the extraction wrote 268,677. Neither is wrong. The counts query counts `DISTINCT molregno` per target, while `aggregate` emits one row per (structure, variant) — so a molecule measured against both a normal protein and its mutant is one in the first and two in the second, while salt stripping collapses distinct ChEMBL ids onto one structure and pushes the other way. 25,247 of the extracted rows are non-wild-type.

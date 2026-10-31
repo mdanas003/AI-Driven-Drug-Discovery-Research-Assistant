@@ -4,6 +4,8 @@ A computational drug discovery project, built one small, working step at a time.
 
 The earlier, much larger version of this project lives in [`legacy/`](legacy/). We will bring ideas back from it only when each one makes sense on its own.
 
+**New here?** [`docs/PIPELINE.md`](docs/PIPELINE.md) is the whole route on one page: how the textbook `clean → features → split → train → test → stats` pipeline maps onto these steps, which box turned out to be the dangerous one, and what is still to come.
+
 ## Step 1: what is a molecule to a computer?
 
 Drug discovery on a computer starts with one question: *given a molecule, what is it like, and could it be a pill?*
@@ -451,6 +453,73 @@ So the right conclusion is not "0.588 was a lie" but something Step 5 already wa
 
 Both are real. The first describes the common case of exploring around a known scaffold; the second describes scaffold-hopping into new territory. A single quoted R² without its protocol is close to meaningless, which is why Satori prints the protocol every time.
 
+## Step 6.1: the whole kinase family
+
+Every stage from 5b to 6.0 eliminated an explanation for why the score is 0.43 and not 0.9. Model class: not it. Label quality: not it. What survived is the dullest hypothesis: **8,450 molecules is a thin sample of chemistry.** Testing it needs far more data than one protein has, and that is what this stage goes and gets.
+
+### Why other kinases are relevant at all
+
+A kinase moves a phosphate group onto another protein, which is the cell's main way of switching things on and off. Humans have about 500 of them, and they share one feature: a pocket that binds ATP, the cell's fuel molecule. Nearly every kinase drug works by sitting in that pocket and blocking it.
+
+Because the pocket is similar across the family, a molecule shaped to block EGFR often partly blocks its relatives. That shared shape is why a measurement against a *different* kinase is a weak clue about EGFR rather than noise — the premise this whole stage rests on.
+
+### Why a 5.76 GB download instead of the API
+
+Step 3 downloads one target over ChEMBL's web API in eight minutes. That route cannot do hundreds of targets: two attempts to fetch merely the **row counts** for 451 targets both died, the second after stalling for thirteen hours. A server that will not answer cannot be retried into answering.
+
+So Stage 6 reads one named release (`chembl_37`) downloaded once. Three things came out of that:
+
+- **One connection to EBI runs at ~290 KB/s**, which puts 5.76 GB at six hours. The server supports byte ranges, so the download is six parallel parts, reassembled and checked against ChEMBL's published SHA256. Forty-eight minutes, and the checksum is what makes the trick safe: a misordered reassembly cannot match it.
+- **Provenance improves.** "chembl_37" is a stronger statement about which data produced a result than a timestamp against a live API.
+- **The plan's expensive step turned out to be free.** It assumed we would need UniProt's list of 491 human kinases mapped to ChEMBL by accession. ChEMBL ships its own protein family tree, so the kinome — and the tyrosine-kinase branch within it — is a local join and zero web requests.
+
+### The query that failed for thirteen hours takes 26 seconds
+
+| | |
+|---|---|
+| Human single-protein kinases with usable IC50 data | **405** |
+| Of those, tyrosine kinases (EGFR's own group) | 79 |
+| Total molecule-rows available | **266,265** |
+| EGFR alone, for comparison | 8,450 |
+
+All nine standard kinase groups are represented, so "the whole kinome" means the family and not one corner of it.
+
+### What came out, measured rather than estimated
+
+At a floor of 100 molecules per target:
+
+| | targets | rows | **distinct molecules** |
+|---|---:|---:|---:|
+| EGFR alone (what Step 5 trained on) | 1 | 8,450 | 8,450 |
+| Setting B: tyrosine kinases | 56 | 132,940 | **81,297** |
+| Setting C: whole kinome | 201 | 268,677 | **177,410** |
+
+The last column is the one that matters. A row here is "this molecule, measured against this protein", so the same molecule tested against twelve kinases is twelve rows but only one piece of chemistry — and the hypothesis under test is specifically that we have seen too little *chemistry*. Setting C brings **167,069 molecules EGFR has never seen: 21x the structural variety Step 5 had.** Rows grow 32x, chemistry 21x, and quoting the larger number would be flattering the experiment before it has run.
+
+The 201 targets split into **514 distinct (protein, variant) tasks**, 247 of them with 50 rows or more, because a mutant protein is its own task — the same rule Step 3 applies to EGFR's own T790M.
+
+### Two things the dump proved about our own code
+
+**It agrees with the API to the row.** Step 3's EGFR file came from the live web service; this one from the bulk release, via six hand-written SQL joins. Both give **10,381 molecules from 16,084 measurements**. Two independent routes to the same data, agreeing exactly — which is the only real check that the SQL reconstructs what the API returned. It is now a test.
+
+**A fixture can confirm a bug instead of catching it.** Fifteen tests passed against a miniature ChEMBL built for this stage. Then the real file arrived and the first query failed: `no such column: pc.l4`. The real `protein_classification` is a parent/child tree with a path string, not flat `l1..l8` columns — and the miniature had `l1..l4` *because that is what the code assumed*.
+
+A hand-built fixture can only check that code agrees with itself. It cannot check the belief both were built on, and it reports success while doing so. The lesson is in the test file as four `@needs_release` tests that run against the actual release and skip without it; they are the ones that caught this.
+
+### What this makes possible
+
+Setting A (EGFR's own mutants) added 2,844 rows — 1.4× — against a ±0.02 R² detection floor, and showed nothing, exactly as pre-registered. The scale is now different:
+
+| Setting | New molecules EGFR has never seen | Multiple of Step 5's chemistry |
+|---|---:|---:|
+| A. Mutants (done, null result) | 2,844 rows, far fewer molecules | 1.4× by rows |
+| **B. Tyrosine kinases** (close relatives) | 70,956 | **9×** |
+| **C. Whole kinome** (volume) | 167,069 | **21×** |
+
+If pooling related-protein data helps, 9× and 21× more chemistry is where it becomes visible. If it still shows nothing at 31×, that is a genuine negative result about transfer in this data, not a failure to measure — and the success and kill criteria were both written down in [the plan](docs/STEP6_PLAN.md) before any of this data existed.
+
+The derived CSVs are gitignored like all of `data/`, so the repository ships the queries rather than 266,265 rows of ChEMBL.
+
 ## Run it
 
 Requires Python 3.11 or newer.
@@ -490,9 +559,25 @@ Find the molecules most similar to a drug, or group the library into chemical se
 .venv\Scripts\python -m satori cluster data\chembl\CHEMBL203_IC50_wild_type.csv
 ```
 
+Work at kinome scale (Stage 6.1). This needs ChEMBL's SQLite release, which is a 5.76 GB download and about 30 GB unpacked, so put it on a drive with room — and not inside a synced folder:
+
+```powershell
+.venv\Scripts\python -m satori kinome-counts D:\chembl_dump\extracted\chembl_37\chembl_37_sqlite\chembl_37.db --out data\kinome_counts.csv
+.venv\Scripts\python -m satori kinome-extract D:\chembl_dump\extracted\chembl_37\chembl_37_sqlite\chembl_37.db --all-kinases --minimum 100
+```
+
+`kinome-extract` writes one file per target in exactly the format `fetch-chembl` produces, skips what is already on disk, and can be interrupted and re-run.
+
 Run the tests:
 
 ```powershell
+.venv\Scripts\python -m pytest -v
+```
+
+Four of them check our SQL against the real release and skip without it. To include them:
+
+```powershell
+$env:SATORI_CHEMBL_DB = "D:\chembl_dump\extracted\chembl_37\chembl_37_sqlite\chembl_37.db"
 .venv\Scripts\python -m pytest -v
 ```
 
@@ -507,7 +592,8 @@ Run the tests:
 - [`src/satori/benchmark.py`](src/satori/benchmark.py): the model line-up and the fair-fight protocol (Step 5b).
 - [`src/satori/labels.py`](src/satori/labels.py): label confidence, training weights, split restriction (Step 5c).
 - [`src/satori/multitask.py`](src/satori/multitask.py): pooling proteins, the leakage filter and its audit (Step 6.0).
-- [`src/satori/__main__.py`](src/satori/__main__.py): the command line tool (`describe`, `screen`, `fetch-chembl`, `similar`, `cluster`, `train`, `benchmark`, `labels`, `multitask`, `predict`).
+- [`src/satori/kinome.py`](src/satori/kinome.py): the kinome and per-target queries over ChEMBL's bulk release (Step 6.1).
+- [`src/satori/__main__.py`](src/satori/__main__.py): the command line tool (`describe`, `screen`, `fetch-chembl`, `similar`, `cluster`, `train`, `benchmark`, `labels`, `multitask`, `kinome-counts`, `kinome-extract`, `predict`).
 - [`examples/known_drugs.csv`](examples/known_drugs.csv): 16 rows of known drugs, including one duplicate and one broken row on purpose.
 - [`tests/`](tests/): checks that the numbers and behaviour are right.
 
@@ -521,6 +607,7 @@ Run the tests:
 5b. **Model bake-off**: prove the model class is not the bottleneck, and measure the data's own ceiling. *(done)*
 5c. **Label quality**: test whether trusting better-measured labels helps. It does not; quantity wins. *(done)*
 6.0. **Multi-task plumbing**: pool EGFR's mutants, with a leakage filter and audit. No effect, as predicted — and it exposed that Step 5's split was leaking. *(done)*
-6.1. **Multi-task at scale**: the whole kinome from ChEMBL's bulk release, where the data is large enough to settle the question. See [the plan](docs/STEP6_PLAN.md).
+6.1. **The kinome, extracted**: 201 kinase targets, 268,677 rows and 177,410 distinct molecules from ChEMBL 37's bulk release — 21x the chemistry Step 5 saw. *(done)*
+6.2. **Multi-task at scale**: run Settings B and C against that data, where the sample is finally large enough to settle the question. See [the plan](docs/STEP6_PLAN.md).
 7. **Targets**: which proteins matter for a disease (Open Targets).
 8. **Later**: web UI, API, docking and 3D structure, generative models, GPU, deployment. Each one is added only when the step before it works.

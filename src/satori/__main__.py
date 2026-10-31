@@ -6,11 +6,14 @@
     python -m satori similar GEFITINIB lib.csv    # nearest neighbours
     python -m satori cluster lib.csv              # group into series
     python -m satori train lib.csv                # predict potency, scored two ways
+    python -m satori kinome-counts chembl_37.db     # what data exists, by target
+    python -m satori kinome-extract chembl_37.db CHEMBL301
     python -m satori predict model.joblib "<SMILES>"
 """
 
 import argparse
 import json
+import sqlite3
 import statistics
 import sys
 from pathlib import Path
@@ -30,7 +33,14 @@ from satori.labels import (
     weights,
 )
 
-from satori.chembl import DEFAULT_ACTIVE_THRESHOLD, build_dataset
+from satori.chembl import (
+    DEFAULT_ACTIVE_THRESHOLD,
+    aggregate,
+    build_dataset,
+    clean,
+    write_csv,
+)
+from satori.kinome import activities_for, connect, kinase_counts, release_of, shortlist
 from satori.library import load_csv, load_table, rank, save_csv, screen
 from satori.model import (
     DEFAULT_REPEATS,
@@ -831,6 +841,123 @@ def cmd_multitask(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_kinome_counts(args: argparse.Namespace) -> int:
+    """How much usable data each human kinase has.
+
+    This is the query that two API attempts failed to answer, the second
+    after thirteen hours of trying. Locally it takes seconds, and it is
+    what the Stage 6.1 shortlist is drawn from.
+    """
+    try:
+        connection = connect(Path(args.db))
+        counts = kinase_counts(connection, args.type)
+    except sqlite3.Error as err:
+        print(f"error: {args.db}: {err}", file=sys.stderr)
+        return 1
+
+    if not counts:
+        print("error: no kinase activity found - is this a ChEMBL release?", file=sys.stderr)
+        return 1
+
+    print(f"{release_of(connection)}, {args.type}, binding assays, curator-approved rows only")
+    print(f"  {len(counts):,} human kinases with at least one usable measurement\n")
+
+    print(f"  {'molecules':>9}  {'rows':>8}  group")
+    for count in counts[:MAX_PRINTED_ROWS]:
+        print(
+            f"  {count.molecules:>9,}  {count.measurements:>8,}  "
+            f"{count.group:<28} {count.chembl_id:<14} {count.name[:38]}"
+        )
+    if len(counts) > MAX_PRINTED_ROWS:
+        print(f"  ... and {len(counts) - MAX_PRINTED_ROWS:,} more")
+
+    chosen = shortlist(counts, args.minimum)
+    tyrosine = shortlist(counts, args.minimum, tyrosine_only=True)
+    print(f"\nAt a floor of {args.minimum:,} molecules per target:")
+    print(
+        f"  Setting B, tyrosine kinases: {len(tyrosine):>4,} targets, "
+        f"{sum(c.molecules for c in tyrosine):>9,} molecules"
+    )
+    print(
+        f"  Setting C, whole kinome:     {len(chosen):>4,} targets, "
+        f"{sum(c.molecules for c in chosen):>9,} molecules"
+    )
+    print(
+        "\nMolecules, not measurements, is the number that matters: a target with"
+        "\n5,000 measurements of 200 compounds is a small dataset in disguise."
+    )
+    if args.out:
+        write_csv(
+            [
+                {
+                    "chembl_id": c.chembl_id,
+                    "name": c.name,
+                    "group": c.group,
+                    "molecules": c.molecules,
+                    "measurements": c.measurements,
+                    "tyrosine_kinase": c.is_tyrosine_kinase,
+                }
+                for c in counts
+            ],
+            Path(args.out),
+        )
+        print(f"\nSaved {args.out}")
+    return 0
+
+
+def cmd_kinome_extract(args: argparse.Namespace) -> int:
+    """Pull selected targets out of the dump, in Step 3's own format.
+
+    Each target is cleaned and aggregated by the same `clean` and
+    `aggregate` Step 3 uses, so these files are interchangeable with the
+    EGFR files already on disk. One file per target, written as we go, so
+    an interrupted run costs one target rather than the whole job.
+    """
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        connection = connect(Path(args.db))
+        targets = list(args.targets)
+        if args.all_kinases:
+            counts = kinase_counts(connection, args.type)
+            selected = shortlist(counts, args.minimum, tyrosine_only=args.tyrosine_only)
+            targets += [c.chembl_id for c in selected]
+    except sqlite3.Error as err:
+        print(f"error: {args.db}: {err}", file=sys.stderr)
+        return 1
+
+    if not targets:
+        print("error: name at least one target, or pass --all-kinases", file=sys.stderr)
+        return 1
+
+    release = release_of(connection)
+    targets = sorted(set(targets))
+    print(f"{release}: extracting {len(targets):,} target(s) into {out_dir}\n")
+
+    written, skipped, molecules = 0, 0, 0
+    for i, target in enumerate(targets, start=1):
+        path = out_dir / f"{target}_{args.type}.csv"
+        if path.exists() and not args.refresh:
+            skipped += 1
+            continue
+        kept, _ = clean(activities_for(connection, target, args.type))
+        rows = aggregate(kept, active_threshold=args.threshold)
+        label = f"  [{i:>4}/{len(targets)}] {target:<14} {len(rows):>6,} molecules"
+        if len(rows) < args.minimum_rows:
+            print(f"{label}  too few, skipped")
+            skipped += 1
+            continue
+        write_csv(rows, path)
+        written += 1
+        molecules += len(rows)
+        print(f"{label}  -> {path.name}")
+
+    print(f"\nWrote {written:,} file(s) holding {molecules:,} molecule-rows, skipped {skipped:,}.")
+    print(f"Source: {release}. Same format as Step 3's output, so Step 5's and Step 6's")
+    print("code reads these without a special case.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="satori", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -977,6 +1104,54 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--repeats", type=int, default=5, help="repeats per row (default: 5)")
     p.add_argument("--seed", type=int, default=0, help="random seed")
     p.set_defaults(func=cmd_labels)
+
+    p = sub.add_parser("kinome-counts", help="how much data each human kinase has")
+    p.add_argument("db", help="the chembl_NN.db file from the SQLite release")
+    p.add_argument("--type", default="IC50", help="measurement type (default: IC50)")
+    p.add_argument(
+        "--minimum",
+        type=int,
+        default=100,
+        help="floor on distinct molecules for the shortlist (default: 100)",
+    )
+    p.add_argument("--out", help="also write the full table to this CSV")
+    p.set_defaults(func=cmd_kinome_counts)
+
+    p = sub.add_parser("kinome-extract", help="pull targets out of the dump, Step 3 format")
+    p.add_argument("db", help="the chembl_NN.db file from the SQLite release")
+    p.add_argument("targets", nargs="*", help="target ChEMBL ids, e.g. CHEMBL301")
+    p.add_argument(
+        "--all-kinases",
+        action="store_true",
+        help="every kinase above --minimum, as well as any named targets",
+    )
+    p.add_argument(
+        "--tyrosine-only",
+        action="store_true",
+        help="with --all-kinases, restrict to EGFR's own branch (Setting B)",
+    )
+    p.add_argument(
+        "--minimum",
+        type=int,
+        default=100,
+        help="floor on distinct molecules when selecting targets (default: 100)",
+    )
+    p.add_argument(
+        "--minimum-rows",
+        type=int,
+        default=50,
+        help="skip a target that cleans down to fewer rows than this",
+    )
+    p.add_argument("--type", default="IC50", help="measurement type (default: IC50)")
+    p.add_argument(
+        "--threshold",
+        type=float,
+        default=DEFAULT_ACTIVE_THRESHOLD,
+        help="pChEMBL at or above which a molecule counts as active",
+    )
+    p.add_argument("--out-dir", default="data/kinome", help="where to write the CSVs")
+    p.add_argument("--refresh", action="store_true", help="re-extract targets already on disk")
+    p.set_defaults(func=cmd_kinome_extract)
 
     p = sub.add_parser("predict", help="predict with a saved model")
     p.add_argument("model", help="a model file written by `train --save`")
